@@ -1,6 +1,7 @@
 /* Native UI verification. Use an empty AgentDock profile and disposable repositories. */
 import assert from 'node:assert/strict';
 import { execFile as exec } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
@@ -14,12 +15,21 @@ if (process.platform !== 'win32' || ![exeArg, ubuntu, windows, distro, output].e
 }
 const exe = resolve(exeArg);
 const report = [];
-const identifier = process.env.AGENTDOCK_VERIFY_IDENTIFIER || 'local.agentdock.workspace';
-if (!/^[A-Za-z0-9.-]+$/.test(identifier)) throw new Error('Invalid fixture application identifier.');
+const suite = process.env.AGENTDOCK_VERIFY_SUITE || 'desktop';
+const identifier = process.env.AGENTDOCK_VERIFY_IDENTIFIER || '';
+if (!new Set(['desktop', 'tmux-keyboard']).has(suite)) throw new Error('Unknown AgentDock verification suite.');
+if (!/^local\.agentdock\.(?:[A-Za-z0-9-]+\.)*(?:verification|qa)$/i.test(identifier)) {
+  throw new Error('Set AGENTDOCK_VERIFY_IDENTIFIER to the disposable identifier compiled into this QA executable.');
+}
+if (!(await readFile(exe)).includes(Buffer.from(identifier))) {
+  throw new Error('The executable does not contain the disposable application identifier.');
+}
 const profile = join(process.env.LOCALAPPDATA, identifier, 'workspace.json');
 const evidence = resolve(output);
 await mkdir(evidence, { recursive: true });
 const sessionIds = new Set();
+const fixtureSockets = new Set();
+let socketDirectory;
 const fixturePaths = new Set([ubuntu, windows, ubuntu + '-clone']);
 const projectName = path => path.split(/[\\/]/).at(-1);
 let launched;
@@ -74,8 +84,10 @@ async function start() {
   browser = await chromium.connectOverCDP(debuggerURL, { timeout: 10000 });
   const page = await until(() => browser.contexts().flatMap(context => context.pages()).find(item => !item.url().startsWith('devtools')), 'workspace page');
   page.setDefaultTimeout(10000);
-  page.on('pageerror', error => console.log('WEBVIEW ERROR ' + error.message));
-  page.on('console', message => { if (message.type() === 'error') console.log('WEBVIEW CONSOLE ' + message.text().slice(0, 350)); });
+  if (suite === 'desktop') {
+    page.on('pageerror', error => console.log('WEBVIEW ERROR ' + error.message));
+    page.on('console', message => { if (message.type() === 'error') console.log('WEBVIEW CONSOLE ' + message.text().slice(0, 350)); });
+  }
   await page.getByRole('main', { name: 'Terminal workspace' }).waitFor();
   if (process.env.AGENTDOCK_TRACE_IPC === '1') {
     ipcTiming = [];
@@ -186,13 +198,309 @@ async function sample(label, count, startup, browserProfile) {
 async function captureWorkspace() {
   const workspace = await readFile(profile, 'utf8').then(JSON.parse).catch(() => null);
   for (const session of Object.values(workspace?.sessions || {})) {
-    if (session.profile === 'ubuntu' && fixturePaths.has(session.path)) {
+    const managed = !session.tmux || session.tmux.socket.endsWith('/agentdock-v1');
+    if (managed && (session.profile === 'ubuntu' || session.backend === 'tmux') && fixturePaths.has(session.path)) {
       sessionIds.add(session.id);
     }
   }
 }
 
-try {
+function wsl(args) {
+  return execFile('wsl.exe', ['--distribution', distro, '--exec', ...args], { timeout: 8000 });
+}
+
+function tmux(socket, ...args) {
+  return wsl(['/usr/bin/tmux', '-S', socket, '-f', '/dev/null', ...args]);
+}
+
+async function closeTmuxFixture(socket) {
+  await tmux(socket, 'kill-server').catch(() => {});
+  await until(() => tmux(socket, 'list-sessions').then(() => false, error =>
+    /no server running|No such file or directory/i.test(error.stderr || '')), 'fixture tmux server shutdown', 3000);
+  await wsl(['/usr/bin/rm', '-f', '--', socket, socket + '.lock']);
+}
+
+async function openTmuxFixture(socket, name) {
+  fixtureSockets.add(socket);
+  await wsl(['/bin/sh', '-c', 'cd -- "$1" || exit; shift; exec "$@"', 'agentdock-qa', ubuntu,
+    '/usr/bin/tmux', '-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', name,
+    '/bin/bash', '--noprofile', '--norc', '-i']);
+}
+
+async function tmuxPanes(socket) {
+  const { stdout } = await tmux(socket, 'list-panes', '-a', '-F',
+    '#{session_id}\t#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_active}\t#{window_active}\t#{pane_left}\t#{pane_top}\t#{pane_current_command}');
+  return stdout.trimEnd().split(/\r?\n/).filter(Boolean).map(row => {
+    const [session, name, id, pid, paneActive, windowActive, left, top, command] = row.split('\t');
+    return { session, name, id, pid: Number(pid), active: paneActive === '1' && windowActive === '1',
+      left: Number(left), top: Number(top), command };
+  });
+}
+
+async function waitForPanes(socket, name, predicate, check) {
+  return until(async () => {
+    const panes = (await tmuxPanes(socket)).filter(pane => pane.name === name);
+    return predicate(panes) && panes;
+  }, check);
+}
+
+async function pick(page, title, choice, search = choice) {
+  const popup = page.getByRole('dialog', { name: title, exact: true });
+  await popup.getByLabel('Search commands').fill(search);
+  const entry = popup.getByRole('button', { name: choice, exact: true });
+  await entry.waitFor();
+  assert.equal(await popup.locator('.command-results button').count(), 1);
+  await page.keyboard.press('Enter');
+  await popup.waitFor({ state: 'hidden' });
+}
+
+async function paletteCommand(page, choice, shortcut = 'Control+Shift+P') {
+  await page.keyboard.press(shortcut);
+  await pick(page, 'Command palette', choice);
+}
+
+async function dismissIntro(page) {
+  await page.waitForFunction(() => document.querySelector('.statusbar .reading strong')?.textContent.includes('GiB'));
+  const skip = page.getByRole('button', { name: 'Skip intro' });
+  if (await skip.isVisible()) await skip.click();
+}
+
+async function checkTmuxKeyboard() {
+  const token = randomUUID().slice(0, 8);
+  const name = 'adqa-' + token;
+  const renamed = name + '-renamed';
+  const other = name + '-other';
+  const keeper = name + '-keeper';
+  const temp = (await wsl(['/usr/bin/mktemp', '-d', '/tmp/agentdock-qa.XXXXXXXXXX'])).stdout.trim();
+  assert.match(temp, /^\/tmp\/agentdock-qa\.[A-Za-z0-9]+$/);
+  socketDirectory = temp;
+  const socket = socketDirectory + '/default';
+  const otherSocket = socketDirectory + '/alternate';
+  await openTmuxFixture(socket, name);
+  await openTmuxFixture(socket, keeper);
+  await openTmuxFixture(otherSocket, other);
+  const [original] = await waitForPanes(socket, name, panes => panes.length === 1, 'fixture tmux pane');
+  const [secondary] = await waitForPanes(otherSocket, other, panes => panes.length === 1, 'other tmux socket');
+
+  let { page } = await start();
+  await dismissIntro(page);
+  await openProject(page, ubuntu);
+  const pin = projects(page).getByRole('button', { name: 'Pin ' + projectName(ubuntu), exact: true });
+  if (await pin.isVisible()) await pin.click();
+  await openProject(page, windows);
+  if (!await projects(page).isVisible()) await toolbar(page, 'Toggle project sidebar').click();
+  const keyboard = page.getByRole('dialog', { name: 'Keyboard shortcuts', exact: true });
+  const saveShortcuts = keyboard.getByRole('button', { name: 'Save shortcuts' });
+  await toolbar(page, 'Command palette').click();
+  await pick(page, 'Command palette', 'Keyboard shortcuts');
+  await keyboard.getByRole('button', { name: 'Restore defaults' }).click();
+  await saveShortcuts.click();
+  await keyboard.waitFor({ state: 'hidden' });
+  await toolbar(page, 'Command palette').focus();
+  await page.keyboard.press('F6');
+  assert.equal(await projects(page).evaluate(region => region.contains(document.activeElement)), true);
+  await page.keyboard.press('F6');
+  assert.equal(await page.getByRole('navigation', { name: 'Terminal tabs' })
+    .evaluate(region => region.contains(document.activeElement)), true);
+  await page.keyboard.press('Control+Shift+L');
+  await pick(page, 'Switch project', projectName(ubuntu));
+  await switchProject(page, windows);
+  await toolbar(page, 'Command palette').evaluate(button => button.dispatchEvent(new KeyboardEvent('keydown', {
+    key: '&', code: 'Digit1', altKey: true, bubbles: true, cancelable: true,
+  })));
+  await until(() => projects(page).getByRole('button', { name: projectName(ubuntu), exact: true })
+    .getAttribute('aria-pressed').then(value => value === 'true'), 'physical AZERTY pinned project key');
+  result('Keyboard workspace region traversal, project picker and physical AZERTY number-row shortcut');
+
+  await paletteCommand(page, 'Browse tmux sessions');
+  const browse = page.getByRole('dialog', { name: 'Browse tmux sessions', exact: true });
+  await browse.getByLabel('Search commands').fill(other);
+  await browse.getByRole('button', { name: `${other} · ${distro} · 1 pane`, exact: true }).waitFor();
+  await pick(page, 'Browse tmux sessions', `${name} · ${distro} · 1 pane`);
+  await cmdAfterMount(page, `export AD_QA_TMUX_TOKEN=${token}; printf 'AD%s=%s\\n' 'QA_TMUX' "$AD_QA_TMUX_TOKEN"`);
+  await textInTerminal(page, 'ADQA_TMUX=' + token);
+  const external = await page.locator('.pane.active').getAttribute('data-session');
+  const [adopted] = await waitForPanes(socket, name, panes => panes.length === 1, 'external attach PID');
+  assert.equal(adopted.pid, original.pid);
+  assert.equal(adopted.session, original.session);
+  result('Discovered external tmux sessions on two sockets and attached to the original interactive shell');
+
+  const historyMarker = 'ADQA_HISTORY_' + token;
+  await command(page, `printf 'AD%s%s\\n' 'QA_HISTORY_' '${token}'; for ((i=0;i<120;i++)); do printf 'qa scrollback %s\\n' "$i"; done`);
+  await textInTerminal(page, 'qa scrollback 119');
+  assert.ok(!(await buffer(page).textContent()).includes(historyMarker), 'search term is past the visible terminal rows');
+  const pane = page.locator('.pane.active');
+  await pane.getByRole('button', { name: 'Find in terminal', exact: true }).click();
+  await pane.getByRole('textbox', { name: 'Find in terminal', exact: true }).fill(historyMarker);
+  await pane.getByRole('button', { name: 'tmux history', exact: true }).click();
+  await until(async () => {
+    const { stdout } = await tmux(socket, 'display-message', '-p', '-t', original.id, '#{pane_in_mode} #{scroll_position}');
+    const [mode, scroll] = stdout.trim().split(' ').map(Number);
+    return mode === 1 && scroll > 0;
+  }, 'tmux scrollback search enters copy mode and scrolls');
+  await textInTerminal(page, historyMarker);
+  await tty(page).focus();
+  await page.keyboard.press('Escape');
+  await until(async () => (await tmux(socket, 'display-message', '-p', '-t', original.id, '#{pane_in_mode}')).stdout.trim() === '0',
+    'leave tmux history copy mode');
+  result('The terminal Find toolbar searched native tmux scrollback and returned to interactive input');
+
+  await paletteCommand(page, 'Rename tmux session');
+  const rename = page.getByRole('dialog', { name: 'Rename tmux session', exact: true });
+  assert.equal(await rename.getByLabel('Session name').inputValue(), name);
+  await rename.getByLabel('Session name').fill(renamed);
+  await rename.getByRole('button', { name: 'Rename', exact: true }).click();
+  await rename.waitFor({ state: 'hidden' });
+  const [renamedPane] = await waitForPanes(socket, renamed, panes => panes.length === 1, 'external rename');
+  assert.equal(renamedPane.pid, original.pid);
+  assert.equal(renamedPane.session, original.session);
+  assert.deepEqual((await tmuxPanes(otherSocket)).find(pane => pane.name === other), secondary);
+  result('Renamed the intended external tmux session without restarting it or touching the other socket');
+
+  await paletteCommand(page, 'Manage tmux panes');
+  await pick(page, 'Manage tmux panes', 'Split tmux pane right');
+  const rightSplit = await waitForPanes(socket, renamed, panes => panes.length === 2, 'right tmux split');
+  const right = rightSplit.find(pane => pane.id !== original.id);
+  assert.ok(right.active && right.left > 0 && right.top === 0);
+  assert.equal(rightSplit.find(pane => pane.id === original.id).pid, original.pid);
+  await paletteCommand(page, 'Manage tmux panes');
+  await pick(page, 'Manage tmux panes', `Focus ${original.id} · ${original.command} · running`);
+  await waitForPanes(socket, renamed, panes => panes.some(pane => pane.id === original.id && pane.active), 'focus original tmux pane');
+  await paletteCommand(page, 'Manage tmux panes');
+  await pick(page, 'Manage tmux panes', `Focus ${right.id} · ${right.command} · running`);
+  await waitForPanes(socket, renamed, panes => panes.some(pane => pane.id === right.id && pane.active), 'focus right tmux pane');
+  await paletteCommand(page, 'Manage tmux panes');
+  await pick(page, 'Manage tmux panes', 'Close focused tmux pane');
+  await page.getByRole('dialog', { name: 'Close tmux pane', exact: true }).getByRole('button', { name: 'Close pane', exact: true }).click();
+  const [remaining] = await waitForPanes(socket, renamed, panes => panes.length === 1, 'close selected tmux pane');
+  assert.equal(remaining.pid, original.pid);
+  result('Managed real tmux right split, exact focus, and confirmed pane close without ending the original shell');
+
+  await paletteCommand(page, 'Keyboard shortcuts');
+  const paletteBinding = keyboard.getByLabel('Command palette', { exact: true });
+  await paletteBinding.fill('Ctrl+Shift+T');
+  await saveShortcuts.click();
+  await keyboard.getByRole('alert').filter({ hasText: 'also assigned' }).waitFor();
+  await paletteBinding.fill('Ctrl+F9');
+  await keyboard.getByLabel('Toggle terminal passthrough', { exact: true }).fill('Ctrl+F8');
+  await keyboard.getByLabel('Split tmux pane below', { exact: true }).fill('Ctrl+F7');
+  await saveShortcuts.click();
+  await keyboard.waitFor({ state: 'hidden' });
+
+  await tty(page).focus();
+  await page.keyboard.press('Control+F8');
+  const passThrough = page.getByRole('button', { name: 'Terminal keys · Ctrl+Shift+Space', exact: true });
+  await passThrough.waitFor();
+  await page.keyboard.press('Control+F9');
+  assert.equal(await page.getByRole('dialog', { name: 'Command palette', exact: true }).count(), 0);
+  await page.keyboard.press('Control+Shift+Space');
+  await passThrough.waitFor({ state: 'hidden' });
+  // The deliberate passthrough chord may leave a partial readline input in this disposable shell.
+  await page.keyboard.press('Control+C');
+  await page.keyboard.press('Control+F7');
+  const bottomSplit = await waitForPanes(socket, renamed, panes => panes.length === 2, 'custom binding for bottom tmux split');
+  const bottom = bottomSplit.find(pane => pane.id !== original.id);
+  assert.ok(bottom.active && bottom.top > 0 && bottom.left === 0);
+  await paletteCommand(page, 'Manage tmux panes', 'Control+F9');
+  await pick(page, 'Manage tmux panes', 'Close focused tmux pane');
+  await page.getByRole('dialog', { name: 'Close tmux pane', exact: true }).getByRole('button', { name: 'Close pane', exact: true }).click();
+  await waitForPanes(socket, renamed, panes => panes.length === 1 && panes[0].pid === original.pid, 'restore single external pane');
+  result('Rejected a conflicting shortcut, honored custom palette and tmux split keys, and recovered from terminal passthrough');
+
+  await tty(page).focus();
+  await page.keyboard.press('Control+Shift+ArrowRight');
+  await until(() => page.locator('.stage > .split.columns > .pane').count().then(count => count === 2), 'workspace keyboard split');
+  const adjacent = await page.locator('.pane.active').getAttribute('data-session');
+  assert.notEqual(adjacent, external);
+  await tty(page).focus();
+  await page.keyboard.press('Control+Alt+ArrowLeft');
+  await until(() => page.locator('.pane.active').getAttribute('data-session').then(id => id === external), 'keyboard focus left workspace pane');
+  await page.keyboard.press('Control+Alt+ArrowRight');
+  await until(() => page.locator('.pane.active').getAttribute('data-session').then(id => id === adjacent), 'keyboard focus right workspace pane');
+  await terminateActive(page);
+  await waitForPanes(socket, renamed, panes => panes.length === 1 && panes[0].pid === original.pid, 'workspace split is independent of tmux');
+  result('Keyboard split and directional focus operated on workspace panes independently from tmux panes');
+
+  await page.keyboard.press('Control+Shift+H');
+  await page.locator('.pane[data-session="' + external + '"]').waitFor({ state: 'hidden' });
+  await waitForPanes(socket, renamed, panes => panes.length === 1 && panes[0].pid === original.pid, 'external shell survives detach');
+  const sessions = page.getByRole('complementary', { name: 'Sessions' });
+  if (!await sessions.isVisible()) await paletteCommand(page, 'Toggle Sessions', 'Control+F9');
+  await sessions.getByLabel('Find sessions').fill(other);
+  await sessions.getByLabel('Filter sessions').selectOption({ label: 'Discovered tmux sessions' });
+  await sessions.getByRole('listitem').getByText(other, { exact: true }).waitFor();
+  await sessions.getByLabel('Find sessions').fill(renamed);
+  await sessions.getByLabel('Filter sessions').selectOption('all');
+  const hidden = sessions.getByRole('listitem').filter({ hasText: renamed });
+  await hidden.getByText('Hidden', { exact: true }).waitFor();
+  await hidden.locator('[data-session-action=open]').click();
+  try {
+    await cmdAfterMount(page, `printf 'AD%s=%s\\n' 'QA_REATTACHED' "$AD_QA_TMUX_TOKEN"`);
+    await textInTerminal(page, 'ADQA_REATTACHED=' + token);
+  } catch (error) {
+    const rows = await tmux(socket, 'capture-pane', '-p', '-t', original.id, '-S', '-8').catch(() => null);
+    if (rows) console.error('Synthetic tmux pane diagnostic', rows.stdout.trim().slice(-600));
+    throw error;
+  }
+  const closeSessions = sessions.getByRole('button', { name: 'Hide Sessions panel', exact: true });
+  if (await closeSessions.isVisible()) await closeSessions.click();
+  result('Detached with the keyboard, discovered a separate socket in Sessions and reattached without losing shell state');
+
+  await switchProject(page, windows);
+  await newShell(page, 'PowerShell');
+  const powershell = await page.locator('.pane.active').getAttribute('data-session');
+  try {
+    await textInTerminal(page, `PS ${windows}>`);
+    await command(page, `$env:AD_QA_WINDOWS_TOKEN='${token}'; Write-Output ('AD'+'QA_WINDOWS_PID='+$PID); (Get-Location).Path`);
+    await textInTerminal(page, 'ADQA_WINDOWS_PID=');
+    await textInTerminal(page, windows);
+  } catch (error) {
+    assert.match(powershell, /^[a-f0-9-]{36}$/i);
+    const rows = await wsl(['/usr/bin/tmux', '-L', 'agentdock-v1', '-f', '/dev/null',
+      'capture-pane', '-p', '-t', '=ad-' + powershell + ':', '-S', '-6']).catch(() => null);
+    if (rows) console.error('Synthetic PowerShell pane diagnostic', rows.stdout.trim().slice(-700));
+    throw error;
+  }
+  const shellPid = Number((await buffer(page).textContent()).match(/ADQA_WINDOWS_PID=(\d+)/)?.[1]);
+  assert.ok(Number.isInteger(shellPid) && alive(shellPid), 'fixture Windows PowerShell process exists');
+  await captureWorkspace();
+  assert.ok(sessionIds.has(powershell), 'the default PowerShell profile saves app-owned tmux metadata');
+  await close(page);
+  assert.equal(alive(shellPid), true, 'Windows PowerShell survives closing AgentDock');
+  await waitForPanes(socket, renamed, panes => panes.length === 1 && panes[0].pid === original.pid, 'external shell survives desktop close');
+  ({ page } = await start());
+  await dismissIntro(page);
+  await page.locator('[data-terminal-id="' + powershell + '"]').click();
+  await cmdAfterMount(page, "Write-Output ('AD'+'QA_WINDOWS_REATTACHED='+$PID+'/'+$env:AD_QA_WINDOWS_TOKEN)");
+  await textInTerminal(page, `ADQA_WINDOWS_REATTACHED=${shellPid}/${token}`);
+  await page.keyboard.press('Control+Shift+U');
+  await pick(page, 'Switch terminal session', `${projectName(ubuntu)} · ${renamed}`);
+  await cmdAfterMount(page, `printf 'AD%s=%s\\n' 'QA_REOPENED' "$AD_QA_TMUX_TOKEN"`);
+  await textInTerminal(page, 'ADQA_REOPENED=' + token);
+  result('Reopened the native window with both external Ubuntu and managed Windows PowerShell processes intact');
+
+  await paletteCommand(page, 'Rename tmux session', 'Control+F9');
+  const staleRename = page.getByRole('dialog', { name: 'Rename tmux session', exact: true });
+  await staleRename.getByLabel('Session name').fill(name + '-stale-write');
+  await tmux(socket, 'kill-session', '-t', original.session);
+  await openTmuxFixture(socket, renamed);
+  const [replacement] = await waitForPanes(socket, renamed, panes => panes.length === 1, 'replacement external session');
+  assert.notEqual(replacement.session, original.session);
+  await staleRename.getByRole('button', { name: 'Rename', exact: true }).click();
+  await staleRename.getByRole('alert').filter({ hasText: 'changed or is no longer available' }).waitFor();
+  assert.deepEqual((await tmuxPanes(socket)).find(pane => pane.name === renamed), replacement);
+  await staleRename.getByRole('button', { name: 'Close', exact: true }).click();
+  result('Persisted the custom shortcut and rejected a stale tmux rename without touching the replacement session');
+
+  await switchProject(page, windows);
+  await page.locator('[data-terminal-id="' + powershell + '"]').click();
+  await terminateActive(page);
+  await until(() => !alive(shellPid), 'explicit close ends the owned default PowerShell process');
+  result('Explicit close ended the managed Windows PowerShell process');
+  await close(page);
+}
+
+async function checkDesktop() {
   let { page, startup, ready, browserProfile } = await start();
   await page.waitForFunction(() => document.querySelector('.statusbar .reading strong')?.textContent.includes('GiB'));
   const clip = page.locator('.intro-video');
@@ -227,7 +535,7 @@ try {
   await projects(page).getByRole('button', { name: 'Pin ' + projectName(windows), exact: true }).click();
   assert.equal(await projects(page).getByRole('button', { name: projectName(windows), exact: true })
     .getAttribute('aria-keyshortcuts'), 'Alt+2');
-  await newShell(page, 'PowerShell');
+  await newShell(page, 'PowerShell (native compatibility)');
   await command(page, "Write-Output ('AD'+'POWER'); (Get-Location).Path");
   await textInTerminal(page, 'ADPOWER');
   await textInTerminal(page, windows);
@@ -419,7 +727,7 @@ try {
   result('Three repeated Ubuntu create-and-terminate cycles under the 20-session load');
 
   await openProject(page, windows);
-  await newShell(page, 'PowerShell');
+  await newShell(page, 'PowerShell (native compatibility)');
   const closingPowerShell = await page.locator('.pane.active').getAttribute('data-session');
   await switchProject(page, ubuntu);
   await page.locator('[data-terminal-id="' + linuxId + '"]').click();
@@ -443,6 +751,11 @@ try {
   await page.getByText('This PowerShell terminal has ended.', { exact: false }).waitFor();
   result('Closing with an active PowerShell prompted and reopening did not start a new PowerShell');
   await close(page);
+}
+
+try {
+  if (suite === 'tmux-keyboard') await checkTmuxKeyboard();
+  else await checkDesktop();
 } catch (error) {
   console.error(error);
   const faultPage = browser?.contexts()[0]?.pages()[0];
@@ -455,7 +768,7 @@ try {
     console.error('Window diagnostic', JSON.stringify(diagnostics));
     if (ipcTiming.length) console.error('Native IPC timing', JSON.stringify(ipcTiming));
   }
-  await faultPage?.screenshot({ path: join(evidence, 'failure.png') }).catch(() => {});
+  if (suite === 'desktop') await faultPage?.screenshot({ path: join(evidence, 'failure.png') }).catch(() => {});
   process.exitCode = 1;
 } finally {
   await captureWorkspace();
@@ -463,9 +776,18 @@ try {
   if (launched && alive(launched.pid)) process.kill(launched.pid);
   for (const id of sessionIds) {
     if (!/^[a-f0-9-]{36}$/i.test(id)) continue;
-    await execFile('wsl.exe', ['--distribution', distro, '--exec', '/usr/bin/tmux', '-L', 'agentdock-v1', 'kill-session', '-t', '=ad-' + id], { timeout: 8000 }).catch(() => {});
+    const owned = ['/usr/bin/tmux', '-L', 'agentdock-v1', '-f', '/dev/null'];
+    const target = '=ad-' + id;
+    await wsl([...owned, 'has-session', '-t', target])
+      .then(() => wsl([...owned, 'kill-session', '-t', target])).catch(() => {});
   }
-  await writeFile(join(evidence, 'desktop-checks.json'), JSON.stringify(report, null, 2));
+  for (const socket of fixtureSockets) {
+    await closeTmuxFixture(socket).catch(error => { console.error(error.message); process.exitCode = 1; });
+  }
+  if (socketDirectory) {
+    await wsl(['/usr/bin/rmdir', '--', socketDirectory]).catch(error => { console.error(error.message); process.exitCode = 1; });
+  }
+  await writeFile(join(evidence, suite + '-checks.json'), JSON.stringify(report, null, 2));
 }
 
 async function cmdAfterMount(page, value) {
