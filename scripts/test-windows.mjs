@@ -144,9 +144,10 @@ async function captureWorkspace() {
 
 try {
   let { page, startup, ready, browserProfile } = await start();
+  await page.waitForFunction(() => document.querySelector('.statusbar .reading strong')?.textContent.includes('GiB'));
   const clip = page.locator('.intro-video');
   if (!await clip.count()) {
-    await page.keyboard.press('Control+Shift+P');
+    await toolbar(page, 'Command palette').click();
     await page.getByRole('button', { name: 'Replay Tux intro', exact: true }).click();
   }
   await until(() => clip.evaluate(video => video.currentTime > 0 && video.videoWidth === 640), 'Tux video decoding', 2800);

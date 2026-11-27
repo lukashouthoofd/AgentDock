@@ -700,7 +700,7 @@ function buildLayout(tree, mounts) {
   const activity = el('span', { class: `session-status ${tone}`, text: label, data: { statusId: session.id } });
   paneLabels.set(session.id, activity);
   const caption = el('button', {
-    type: 'button', class: 'pane-caption', draggable: true,
+    type: 'button', class: 'pane-caption', draggable: 'true',
     title: `${profileName(session.profile)} • ${session.path}`, onClick: () => view.get(session.id)?.focus(),
   }, icon('terminal'), el('strong', { text: session.title }), session.role ? el('span', { text: session.role }) : null);
   caption.addEventListener('dragstart', event => event.dataTransfer.setData('application/x-agentdock-pane', session.id));
