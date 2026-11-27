@@ -11,6 +11,7 @@ const kinds = {
 const tones = new Set(['ok', 'cool', 'bad']);
 const relative = new Intl.RelativeTimeFormat('en', { numeric: 'always', style: 'short' });
 const narrow = '(max-width: 1399px)';
+const paneType = 'application/x-agentdock-pane';
 
 function relativeTime(value, now, prefix) {
   if (!Number.isFinite(value) || value <= 0 || value > 8.64e15) return null;
@@ -82,6 +83,7 @@ export function createSessionsView({
   let currentProject;
   let signature;
   let layouts;
+  let draggingId;
 
   function isCurrent(row) {
     if (!currentProject) return false;
@@ -103,13 +105,31 @@ export function createSessionsView({
     const follow = action => async () => {
       if (await action(row.id) !== false) hideOverlay();
     };
+    const heading = el('div', {
+      class: 'session-rail-row-heading', draggable: true,
+      title: `Drag ${row.title} into the workspace`, data: { paneSource: row.id },
+      onDragstart: event => {
+        if (!event.dataTransfer) return;
+        draggingId = row.id;
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData(paneType, row.id);
+        requestAnimationFrame(() => {
+          if (draggingId === row.id) element.classList.add('session-rail-dragging');
+        });
+      },
+      onDragend: event => {
+        draggingId = undefined;
+        element.classList.remove('session-rail-dragging');
+        if (event.dataTransfer?.dropEffect === 'move') hideOverlay();
+        render();
+      },
+    }, icon('terminal'), el('strong', { class: 'session-rail-ellipsis', text: row.title }),
+    el('span', { class: `session-status ${row.tone}`, text: row.label }));
     const item = el('li', {
       class: 'session-rail-row', 'aria-current': active ? 'true' : null,
       'data-attention': row.attention ? 'true' : null,
     },
-    el('div', { class: 'session-rail-row-heading' },
-      icon('terminal'), el('strong', { class: 'session-rail-ellipsis', text: row.title, title: row.title }),
-      el('span', { class: `session-status ${row.tone}`, text: row.label })),
+    heading,
     el('div', { class: 'session-rail-meta' },
       row.role || row.kind ? el('span', { class: 'session-rail-ellipsis', text: row.role || row.kind,
         title: [row.role, row.kind].filter(Boolean).join(' / ') }) : null,
@@ -131,8 +151,11 @@ export function createSessionsView({
       run(active ? 'Focus' : 'Open', follow(activate), {
         action: 'open', title: `${active ? 'Focus' : 'Open'} ${row.title}`,
       }),
-      run('Beside', follow(dock), {
+      run('Beside', follow(id => dock(id, 'columns')), {
         action: 'dock', icon: 'split', disabled: active, title: `Place ${row.title} beside the focused terminal`,
+      }),
+      run('Below', follow(id => dock(id, 'rows')), {
+        action: 'dock-below', icon: 'split', disabled: active, title: `Place ${row.title} below the focused terminal`,
       }),
       hide ? run('Hide', () => hide(row.id), {
         action: 'hide', disabled: !row.inLayout, title: `Hide ${row.title} and keep the terminal session`,
@@ -142,6 +165,7 @@ export function createSessionsView({
   }
 
   function render() {
+    if (draggingId) return;
     const currentName = currentProject?.name || 'None';
     projectName.textContent = currentName;
     projectName.title = currentName;
