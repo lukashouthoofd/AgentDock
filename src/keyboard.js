@@ -165,6 +165,7 @@ export function createKeymap(overrides) {
       if (passthrough && event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey
         && (event.code === 'Space' || keyName(event.key) === 'Space')) return 'togglePassthrough';
       const binding = captureKeybinding(event);
+      if (binding === 'Ctrl+V' && context === 'terminal') return null;
       if (passthrough) return actions.get(binding) === 'togglePassthrough' ? 'togglePassthrough' : null;
       if (context !== 'workspace' && context !== 'terminal') return null;
       return actions.get(binding) ?? null;

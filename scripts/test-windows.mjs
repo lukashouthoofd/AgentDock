@@ -17,7 +17,7 @@ const exe = resolve(exeArg);
 const report = [];
 const suite = process.env.AGENTDOCK_VERIFY_SUITE || 'desktop';
 const identifier = process.env.AGENTDOCK_VERIFY_IDENTIFIER || '';
-if (!new Set(['desktop', 'tmux-keyboard']).has(suite)) throw new Error('Unknown AgentDock verification suite.');
+if (!new Set(['desktop', 'tmux-keyboard', 'clipboard']).has(suite)) throw new Error('Unknown AgentDock verification suite.');
 if (!/^local\.agentdock\.(?:[A-Za-z0-9-]+\.)*(?:verification|qa)$/i.test(identifier)) {
   throw new Error('Set AGENTDOCK_VERIFY_IDENTIFIER to the disposable identifier compiled into this QA executable.');
 }
@@ -833,8 +833,67 @@ async function checkDesktop() {
   await close(page);
 }
 
+async function checkClipboard() {
+  const { page } = await start();
+  await dismissIntro(page);
+  await openProject(page, ubuntu);
+  await newShell(page);
+  await page.evaluate(() => {
+    const endpoint = window.__TAURI_INTERNALS__.convertFileSrc('clipboard_read', 'ipc');
+    const fetchNative = window.fetch.bind(window);
+    window.clipboardFixture = { value: null, reads: 0 };
+    window.fetch = (url, options) => {
+      if (url !== endpoint) return fetchNative(url, options);
+      const fixture = window.clipboardFixture;
+      fixture.reads++;
+      return Promise.resolve(new Response(JSON.stringify(fixture.value), {
+        headers: { 'content-type': 'application/json', 'tauri-response': 'ok' },
+      }));
+    };
+  });
+  const setClipboard = value => page.evaluate(value => { window.clipboardFixture.value = value; }, value);
+  const waitForTerminalText = text => until(async () => {
+    await restoreFixtureWindow(page);
+    return (await buffer(page).textContent({ timeout: 1500 }))?.includes(text);
+  }, `clipboard fixture output ${text}`);
+  const pressInTerminal = async chord => {
+    await restoreFixtureWindow(page);
+    await tty(page).press(chord);
+  };
+  for (const [chord, text] of [['Control+v', 'AgentDock λ雪 text'], ['Control+Shift+V', 'AgentDock second paste']]) {
+    await setClipboard(text);
+    await command(page, `IFS= read -r line; printf 'AD_%s<%s>\\n' 'CLIP' "$line"`);
+    await pressInTerminal(chord);
+    await waitForTerminalText(text);
+    await pressInTerminal('Enter');
+    await waitForTerminalText(`AD_CLIP<${text}>`);
+    result(`${chord} pasted the fixture text into the Ubuntu terminal exactly once`);
+  }
+
+  await setClipboard(null);
+  await command(page, `python3 -c 'import os, termios, tty; fd = 0; old = termios.tcgetattr(fd); tty.setraw(fd); print("AD_RAW_" + "READY", flush=True); byte = os.read(fd, 1); termios.tcsetattr(fd, termios.TCSADRAIN, old); print("AD_RAW_BYTE=" + byte.hex())'`);
+  await waitForTerminalText('AD_RAW_READY');
+  await pressInTerminal('Control+v');
+  await waitForTerminalText('AD_RAW_BYTE=16');
+  result('Ctrl+V forwarded the native control key when the clipboard supplied no text');
+  await terminateActive(page);
+
+  if (process.env.AGENTDOCK_VERIFY_CODEX === '1') {
+    await newShell(page, 'Codex');
+    await waitForTerminalText('Codex');
+    const text = 'AgentDock clipboard Codex fixture';
+    await setClipboard(text);
+    await pressInTerminal('Control+v');
+    await waitForTerminalText(text);
+    result('Ctrl+V inserted text into the Codex input');
+    await terminateActive(page);
+  }
+  await close(page);
+}
+
 try {
   if (suite === 'tmux-keyboard') await checkTmuxKeyboard();
+  else if (suite === 'clipboard') await checkClipboard();
   else await checkDesktop();
 } catch (error) {
   console.error(error);
@@ -843,6 +902,7 @@ try {
     const diagnostics = await faultPage.evaluate(async () => ({
       visibility: document.visibilityState,
       pane: document.querySelector('.pane.active .terminal-feedback:not([hidden])')?.textContent,
+      clipboardFixtureReads: window.clipboardFixture?.reads,
       minimized: await window.__TAURI_INTERNALS__.invoke('plugin:window|is_minimized', { label: 'main' }).catch(() => null),
     })).catch(() => null);
     console.error('Window diagnostic', JSON.stringify(diagnostics));

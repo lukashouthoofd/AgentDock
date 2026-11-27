@@ -23,6 +23,8 @@ The delivery gates are tracked in [the mission checkpoint](mission.md). Developm
 
 Use `AGENTDOCK_VERIFY_IDENTIFIER` to specify the disposable identifier compiled into the test executable. Set `AGENTDOCK_VERIFY_SUITE=tmux-keyboard` for the focused suite, which uses disposable tmux sockets and reuses the native app entry point.
 
+Set `AGENTDOCK_VERIFY_SUITE=clipboard` to test Ctrl+V, Ctrl+Shift+V and the no-text fallback in a real Ubuntu terminal with synthetic clipboard data. Set `AGENTDOCK_VERIFY_CODEX=1` to also verify that Ctrl+V fills the installed Codex CLI input.
+
 The test harness checks the Linux kernel and exact Ubuntu distro from inside the terminal. It records results in an external evidence directory and terminates only the fixture session IDs. It can use `AGENTDOCK_MEASURE_SCRIPT` to invoke the process-tree sampler during its idle and ten-Ubuntu-terminal phases.
 
 ## AgentDock 0.2.0

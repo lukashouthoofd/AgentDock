@@ -41,6 +41,10 @@ test('user overrides can move or clear defaults and never swallow native paste c
   assert.equal(map.bindings.worktrees, null);
   assert.equal(map.resolve({ key: 'Enter' }), null);
   assert.equal(map.resolve({ key: 'V', ctrlKey: true, shiftKey: true }), null);
+  const paste = { key: 'v', ctrlKey: true };
+  const custom = createKeymap({ palette: 'Ctrl+V' });
+  assert.equal(custom.resolve(paste, { context: 'workspace' }), 'palette');
+  assert.equal(custom.resolve(paste, { context: 'terminal' }), null);
   assert.equal(map.resolve({ key: 'X', isComposing: true }), null);
 });
 

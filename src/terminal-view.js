@@ -59,14 +59,16 @@ export class TerminalView {
     this.term.onBell(() => this.onState(this.session.id, 'bell'));
     this.term.onBinary(value => this.send(Uint8Array.from(value, character => character.charCodeAt(0))));
     this.term.attachCustomKeyEventHandler(event => {
-      if (event.type !== 'keydown') return true;
+      if (event.type !== 'keydown' || event.isComposing || event.altKey || event.metaKey) return true;
       const key = event.key.toLowerCase();
       if (event.ctrlKey && event.shiftKey && key === 'c') {
         if (this.term.hasSelection()) invoke('clipboard_write', { value: this.term.getSelection() }).catch(reportError);
         return false;
       }
-      if ((event.ctrlKey && event.shiftKey && key === 'v') || (event.shiftKey && key === 'insert')) {
-        this.pasteClipboard();
+      const ctrlV = event.ctrlKey && key === 'v';
+      if (ctrlV || (event.shiftKey && key === 'insert')) {
+        event.preventDefault();
+        if (!event.repeat) this.pasteClipboard(ctrlV && !event.shiftKey).catch(reportError);
         return false;
       }
       return true;
@@ -75,9 +77,14 @@ export class TerminalView {
     this.observer.observe(this.surface);
   }
 
-  pasteClipboard() {
+  async pasteClipboard(forwardIfEmpty) {
+    if (!this.connected) return;
     const epoch = this.epochCounter;
-    invoke('clipboard_read').then(value => this.pasteText(value, epoch)).catch(reportError);
+    const value = await invoke('clipboard_read');
+    if (value) return this.pasteText(value, epoch);
+    if (!this.connected || !this.mounted || epoch !== this.epochCounter) return;
+    if (forwardIfEmpty) this.send(Uint8Array.of(0x16));
+    else throw new Error('No text is available on the clipboard.');
   }
 
   async pasteText(value, epoch = this.epochCounter) {

@@ -304,11 +304,13 @@ async fn template_remove(
 }
 
 #[tauri::command]
-async fn clipboard_read() -> Result<String> {
+async fn clipboard_read() -> Result<Option<String>> {
     blocking(move || {
-        arboard::Clipboard::new()
-            .and_then(|mut clipboard| clipboard.get_text())
-            .map_err(|_| "No text is available on the clipboard.".into())
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+            Ok(text) => Ok(Some(text)),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(_) => Err("Could not read the Windows clipboard. Try pasting again.".into()),
+        }
     })
     .await
 }

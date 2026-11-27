@@ -42,7 +42,8 @@ The default installer output is under `src-tauri/target/release/bundle/nsis`. Ca
 | Worktrees | Ctrl+Shift+W |
 | Workflows and saved prompts | Ctrl+Shift+E |
 | Find in terminal | Ctrl+Shift+F |
-| Terminal copy and paste | Ctrl+Shift+C / Ctrl+Shift+V |
+| Terminal copy | Ctrl+Shift+C |
+| Paste Windows clipboard text into a terminal | Ctrl+V or Ctrl+Shift+V |
 | Toggle full screen | F11 |
 
 The **Projects** plus opens an existing folder or clones a repository. The plus at the right of the tab row opens a terminal. Drag a pane title or session row to a pane edge to arrange terminals from any project. **Move terminal to another pane** offers the same placement controls from the command palette. Drag a divider or use arrow keys on the focused divider to resize. The Sessions panel can hide terminals, restore named layouts and surface terminal bells or configured periods of quiet.
