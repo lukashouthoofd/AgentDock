@@ -1,0 +1,13 @@
+# Spotify in AgentDock
+
+Open Spotify from the AgentDock toolbar. The playback controls use the Spotify desktop app’s existing Windows media session and work independently of the optional account connection. Track and artist appear when Spotify publishes them. A control is enabled when that session advertises it. If Windows reports no Spotify media session, start playback in the Spotify desktop app once. The Spotify web player can report a browser-owned session, which AgentDock leaves alone. [Windows Media Control](https://learn.microsoft.com/en-us/uwp/api/windows.media.control)
+
+## Connect your account
+
+1. Create a personal app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard), enable Web API, and save the exact redirect URI `http://127.0.0.1:45867/callback`.
+2. Add your listener account under the dashboard’s approved users if it differs from the app owner. Spotify requires a Premium subscription for the Development Mode app owner. [Spotify Development Mode rules](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide)
+3. Open **Connect Spotify for search and library** in AgentDock. Enter the public Client ID, select **Authorize in browser**, approve the request on Spotify’s site, and return to AgentDock. Port `45867` must be free while connecting. The temporary, two-minute listener binds only to `127.0.0.1` and uses Authorization Code with PKCE. [Spotify PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
+
+Search tracks, playlists, podcasts and episodes in the panel. **My library** lists the selected category from your saved items and playlists. **Play** starts a track or playlist on your active Spotify device and requires Spotify Premium. Podcasts and episodes open in Spotify so you can choose playback there. **Search in browser** also works without connecting AgentDock. All catalog requests occur after a user action. [Spotify search](https://developer.spotify.com/documentation/web-api/reference/search) · [Spotify playback](https://developer.spotify.com/documentation/web-api/reference/start-a-users-playback)
+
+AgentDock keeps access tokens in memory and protects your refresh token with Windows DPAPI for the current Windows user. The panel checks Windows playback every 2.5 seconds while open. Search terms, catalog results and playback information are held in memory during use. **Disconnect Spotify** removes the local authorization. Remove **AgentDock** from Spotify’s account apps page to revoke Spotify-side authorization. [Spotify account apps](https://www.spotify.com/account/apps/)
