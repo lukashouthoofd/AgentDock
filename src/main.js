@@ -281,7 +281,10 @@ async function openProject() {
 async function cloneProject() {
   await ready;
   const remote = input('', { placeholder: 'https://github.com/owner/repository.git', spellcheck: 'false' });
-  const destination = input(model.settings.cloneRoot + '/', { spellcheck: 'false' });
+  const separator = model.settings.cloneRoot.includes(String.fromCharCode(92)) ? String.fromCharCode(92) : '/';
+  const root = model.settings.cloneRoot.replace(/[\\/]+$/, '') + separator;
+  const destination = input(root, { spellcheck: 'false' });
+  let customDestination = false;
   const distro = select((distros.length ? distros : [projectDistro()]).map(name => [name, name]), projectDistro());
   const form = el('form', { class: 'field-stack' }, field('Repository URL or path', remote),
     field('New folder', destination), field('Ubuntu distribution', distro));
@@ -292,10 +295,11 @@ async function cloneProject() {
     await normalizeProject(location.display, location.distro || distro.value);
     ui.close();
   }, ui.error);
-  remote.addEventListener('change', () => {
-    if (destination.value === model.settings.cloneRoot + '/') {
+  destination.addEventListener('input', () => { customDestination = true; });
+  remote.addEventListener('input', () => {
+    if (!customDestination) {
       const name = pathName(remote.value.trim().split(':').at(-1)).replace(/\.git$/i, '');
-      if (name) destination.value += name;
+      destination.value = root + name;
     }
   });
   form.addEventListener('submit', event => { event.preventDefault(); submit(event); });

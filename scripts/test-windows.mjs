@@ -253,7 +253,11 @@ try {
   await clone.getByLabel('New folder').fill(ubuntu + '-clone');
   await clone.getByRole('button', { name: 'Clone' }).click();
   await clone.waitFor({ state: 'hidden', timeout: 30000 });
-  result('Local Git CLI clone created and opened a new Ubuntu project');
+  await until(async () => {
+    const current = JSON.parse(await readFile(profile, 'utf8'));
+    return current.projects.some(item => item.path === ubuntu + '-clone');
+  }, 'exact clone destination');
+  result('Local Git CLI clone created and opened the requested Ubuntu path');
   await page.locator('[data-terminal-id="' + linuxId + '"]').click();
 
   const outputStarted = performance.now();
