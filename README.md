@@ -1,10 +1,10 @@
 # AgentDock
 
-AgentDock is a Windows terminal workspace for development in Ubuntu WSL and PowerShell. It keeps project and worktree navigation, terminal layouts, prompts, dotenv editing and development status in one window. It uses the Claude Code, Codex, Antigravity, Git, GitHub CLI and Docker installations already available in the selected environment.
+AgentDock is an open-source, AI-native development workspace for Windows, Ubuntu WSL and PowerShell. It brings coding-agent terminals, projects and worktrees, persistent layouts, prompts, dotenv editing and development status into one window. It uses your own installations and accounts for Claude Code, Codex, Antigravity, Git, GitHub CLI and Docker; these integrations are optional and are not bundled credentials.
 
 ## Install
 
-- Use the Windows x64 setup executable produced by the build below. AgentDock installs for the current user with a desktop shortcut and Start menu entry.
+- Build the Windows x64 setup executable using the instructions below. AgentDock installs for the current user with a desktop shortcut and Start menu entry. No prebuilt release is currently provided.
 - Have WebView2 and a functioning Ubuntu WSL distribution. Ubuntu needs tmux and Python 3. Windows PowerShell and Antigravity also open inside Ubuntu tmux by default.
 - Open an existing folder or clone a repository. Select **Shell**, **Claude**, or **Codex** on a project to start a terminal there.
 
@@ -13,6 +13,8 @@ AgentDock is a Windows terminal workspace for development in Ubuntu WSL and Powe
 Use Node.js 22, Rust with the MSVC target, Microsoft C++ Build Tools and WebView2.
 
 ```powershell
+git clone https://github.com/lukashouthoofd/AgentDock.git
+cd AgentDock
 npm ci
 npm test
 cargo test --manifest-path src-tauri/Cargo.toml --locked
@@ -56,6 +58,10 @@ tmux sessions retain their processes and available history while you hide a pane
 
 After a reboot, **Resume agent** opens the installed CLI's own conversation history. Set a conversation ID in **Terminal details** for an exact resume. Claude Code sessions started with the standard launcher already have an assigned ID. Codex can open its native picker and Antigravity needs an explicit conversation ID. New coding agent launches use the workspace's full-access setting. Prompt Studio uses the existing Claude login and offers model selection.
 
+**Agent permissions:** Full access is enabled by default for new agent sessions. It passes the relevant CLI flags to bypass approval prompts and, for Codex, the sandbox. Turn off **Full access for new coding agent sessions** in Settings if you want to use the CLI's normal permission behavior. Existing sessions keep their launch settings.
+
+AgentDock starts with an empty workspace on each user's machine. Project dotenv files remain in their projects and are not included in this repository. Configure and authenticate any agent or optional integration yourself; see [Spotify setup](docs/spotify.md) for its optional connection.
+
 New repositories default to `~/projects` inside Ubuntu. Change **Default clone directory** to use another location. Existing Windows folders remain supported.
 
 Use the X on a terminal pane, a single-terminal tab, or a session row to close that terminal. Live terminals require confirmation. Hide keeps a session running, and the Sessions panel can reopen or close hidden sessions. Use All sessions to find exited terminals.
@@ -75,6 +81,8 @@ The Development panel fetches PR and Docker details on demand. Use the Spotify p
 - [Spotify setup](docs/spotify.md)
 - [Ship It merge celebrations](docs/ship-it.md)
 - [Upstream licences and credits](THIRD_PARTY_NOTICES.txt)
+
+AgentDock's own source is available under the [MIT License](LICENSE). Bundled third-party components and assets have their own licenses and attribution requirements; see the notices above.
 
 ## Troubleshooting
 
