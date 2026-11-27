@@ -486,6 +486,7 @@ pub struct Terminals {
     ptys: Mutex<HashMap<String, Arc<Pty>>>,
     lifecycle: Mutex<()>,
     next_attachment: AtomicU64,
+    configured_alerts: Mutex<HashSet<String>>,
 }
 
 impl Terminals {
@@ -543,10 +544,8 @@ impl Terminals {
                     .into(),
             );
         }
-        let session = target(&spec.id)?;
-        let mut args = vec!["has-session", "-t", &session];
-        args.extend_from_slice(TMUX_ALERT_OPTIONS);
-        execute_tmux(&spec.distro, &args, "This Ubuntu terminal is no longer available.")?;
+        // tmux reports a missing session through the PTY. A separate WSL
+        // invocation here would block independent pane attachments.
         let pty = Pty::spawn(spec, cols, rows)?;
         pty.attachment.store(attachment, Ordering::Release);
         self.ptys.lock().unwrap().insert(spec.id.clone(), pty);
@@ -692,16 +691,21 @@ impl Terminals {
             if host::valid_distro(&distro).is_err() {
                 continue;
             }
-            let snapshot = host::output_bounded(tmux(&distro).args([
+            let mut args = vec![
                 "list-panes",
                 "-a",
                 "-F",
                 "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{window_bell_flag}\t#{window_activity}\t#{@agentdock-bell}",
-            ]), WSL_DEADLINE);
+            ];
+            if !self.configured_alerts.lock().unwrap().contains(&distro) {
+                args.extend_from_slice(TMUX_ALERT_OPTIONS);
+            }
+            let snapshot = host::output_bounded(tmux(&distro).args(args), WSL_DEADLINE);
             let Ok(snapshot) = snapshot else { continue };
             if !snapshot.status.success() {
                 continue;
             }
+            self.configured_alerts.lock().unwrap().insert(distro);
             for line in host::text(&snapshot.stdout).lines() {
                 let parts: Vec<_> = line.split('\t').collect();
                 if let [name, dead, status, signal, bell, activity, count] = parts.as_slice() {

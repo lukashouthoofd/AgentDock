@@ -47,6 +47,7 @@ let saved = Promise.resolve();
 let closed = false;
 let closing = false;
 let sample;
+let healthFlight;
 const mergeSince = new Map();
 const observedKeys = new Set();
 const appMergeNotices = new Set();
@@ -273,7 +274,11 @@ function paintStatus(id) {
   else if (pane) delete pane.dataset.alert;
 }
 
-async function refreshHealth() {
+function refreshHealth() {
+  return healthFlight ??= readHealth().finally(() => { healthFlight = undefined; });
+}
+
+async function readHealth() {
   const distros = [...new Set(Object.values(model.sessions).filter(session => session.profile === 'ubuntu')
     .map(session => session.distro))];
   if (Object.keys(model.sessions).length) {
@@ -701,7 +706,7 @@ async function mergeBranch() {
 }
 
 async function observeMerges() {
-  if (mergeInFlight) return;
+  if (mergeInFlight || waiters.size || hiding.size || $('dialog[open]')) return;
   const paths = new Map();
   function add(path, distro, item) { paths.set(distro + '\n' + path, { path, distro, item }); }
   for (const item of model.projects) {
@@ -717,8 +722,11 @@ async function observeMerges() {
   const entries = [...paths];
   const selected = Array.from({ length: Math.min(entries.length, 3) }, () => entries[observationIndex++ % entries.length]);
   const started = Math.floor(Date.now() / 1000);
-  await Promise.allSettled(selected.map(async ([key, { path, distro, item }]) => {
-    const outcomes = await invoke('merge_observe', { path, distro, since: mergeSince.get(key) || observerStarted });
+  for (const [key, { path, distro, item }] of selected) {
+    if (waiters.size || hiding.size || $('dialog[open]')) break;
+    const outcomes = await invoke('merge_observe', { path, distro, since: mergeSince.get(key) || observerStarted })
+      .catch(() => null);
+    if (!outcomes) continue;
     if (mergeInFlight) return;
     mergeSince.set(key, started);
     for (const outcome of outcomes) {
@@ -728,7 +736,7 @@ async function observeMerges() {
       celebrateShip(outcome);
       if (item) refreshGit(item, path);
     }
-  }));
+  }
 }
 
 function palette() {
