@@ -640,17 +640,17 @@ impl Terminals {
         {
             return Err("Enter a single-line terminal search term.".into());
         }
-        let session = target(&spec.id)?;
+        let pane = format!("{}:", target(&spec.id)?);
         execute_tmux(
             &spec.distro,
             &[
                 "copy-mode",
                 "-t",
-                &session,
+                &pane,
                 ";",
                 "send-keys",
                 "-t",
-                &session,
+                &pane,
                 "-X",
                 if backward {
                     "search-backward"
