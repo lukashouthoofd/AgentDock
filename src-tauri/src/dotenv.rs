@@ -16,6 +16,7 @@ const CONFLICT: &str = "The dotenv file changed on disk. Reload it before saving
 const INVALID_NAME: &str = "Enter a dotenv filename such as .env, .env.local or settings.env.";
 const NOT_REGULAR: &str = "Choose a regular dotenv file. Links and special files are unavailable.";
 const BACKTICK: u8 = 0x60;
+const STAGING_PREFIX: &str = ".env.agentdock-stage-";
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Serialize)]
@@ -93,6 +94,11 @@ pub fn create(root: &Path, name: &str) -> Result<Document, String> {
         .lock()
         .map_err(|_| "Could not prepare the dotenv file.")?;
     let (_, path) = target(root, name)?;
+    #[cfg(windows)]
+    if let Some(path) = WslFile::from_unc(&path) {
+        path.write(None, b"")?;
+        return Ok(document("", fingerprint(""), &[]));
+    }
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -133,36 +139,110 @@ pub fn save(root: &Path, name: &str, version: &str, edits: Vec<Edit>) -> Result<
         );
     }
     if output != before.source {
-        let permissions = before
-            .file
-            .metadata()
-            .map_err(|_| "Could not read the dotenv file permissions.")?
-            .permissions();
-        if permissions.readonly() {
-            return Err("The dotenv file is read-only.".into());
-        }
-        let mut temp = tempfile::Builder::new()
-            .prefix(".agentdock-env-")
-            .tempfile_in(directory)
-            .map_err(|_| "Could not stage the dotenv save in the project folder.")?;
-        temp.write_all(output.as_bytes())
-            .and_then(|_| temp.as_file().set_permissions(permissions))
-            .and_then(|_| temp.as_file().sync_all())
-            .map_err(|_| "Could not write the staged dotenv file.")?;
-
-        // The existing Windows handle denies in-place writes. Recheck the path for replacements.
-        let latest = snapshot(&path).map_err(|_| CONFLICT)?;
-        if latest.version != version {
-            return Err(CONFLICT.into());
-        }
-        // Windows can reject a rename over an open destination even if delete sharing is enabled.
-        drop(latest);
-        drop(before);
-        temp.persist(&path)
-            .map_err(|_| "Could not replace the dotenv file. The staged save was discarded.")?;
+        replace_file(&directory, &path, version, before, &output)?;
     }
 
     Ok(document(&output, fingerprint(&output), &output_entries))
+}
+
+fn replace_file(
+    directory: &Path,
+    path: &Path,
+    version: &str,
+    before: Snapshot,
+    output: &str,
+) -> Result<(), String> {
+    let permissions = before
+        .file
+        .metadata()
+        .map_err(|_| "Could not read the dotenv file permissions.")?
+        .permissions();
+    if permissions.readonly() {
+        return Err("The dotenv file is read-only.".into());
+    }
+    #[cfg(windows)]
+    if let Some(path) = WslFile::from_unc(path) {
+        drop(before);
+        return path.write(Some(version), output.as_bytes());
+    }
+
+    let mut temp = tempfile::Builder::new()
+        .prefix(STAGING_PREFIX)
+        .tempfile_in(directory)
+        .map_err(|_| "Could not stage the dotenv save in the project folder.")?;
+    #[cfg(windows)]
+    protect_windows_stage(&before.file, temp.path())?;
+    temp.write_all(output.as_bytes())
+        .and_then(|_| temp.as_file().set_permissions(permissions))
+        .and_then(|_| temp.as_file().sync_all())
+        .map_err(|_| "Could not write the staged dotenv file.")?;
+
+    // The existing Windows handle denies in-place writes. Recheck the path for replacements.
+    let latest = snapshot(path).map_err(|_| CONFLICT)?;
+    if latest.version != version {
+        return Err(CONFLICT.into());
+    }
+    // Windows can reject a rename over an open destination even if delete sharing is enabled.
+    drop(latest);
+    drop(before);
+    temp.persist(path)
+        .map(|_| ())
+        .map_err(|_| "Could not replace the dotenv file. The staged save was discarded.".into())
+}
+
+#[cfg(windows)]
+fn protect_windows_stage(original: &File, stage: &Path) -> Result<(), String> {
+    use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
+    use windows_sys::Win32::{
+        Foundation::ERROR_INSUFFICIENT_BUFFER,
+        Security::{
+            GetKernelObjectSecurity, GetSecurityDescriptorControl, SetFileSecurityW,
+            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        },
+    };
+
+    const ERROR: &str = "Could not preserve permissions for the staged dotenv file.";
+    let handle = original.as_raw_handle();
+    let mut length = 0;
+    // The first call returns the required length without dereferencing a null descriptor.
+    let success = unsafe {
+        GetKernelObjectSecurity(
+            handle,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            0,
+            &mut length,
+        )
+    };
+    if success != 0
+        || io::Error::last_os_error().raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32)
+        || !(1..=128 * 1024).contains(&length)
+    {
+        return Err(ERROR.into());
+    }
+
+    let mut descriptor = vec![0_u64; (length as usize).div_ceil(8)];
+    let data = descriptor.as_mut_ptr().cast();
+    let mut control = 0;
+    let mut revision = 0;
+    let path: Vec<u16> = stage.as_os_str().encode_wide().chain([0]).collect();
+    // The descriptor and path buffers remain allocated through all three system calls.
+    unsafe {
+        if GetKernelObjectSecurity(handle, DACL_SECURITY_INFORMATION, data, length, &mut length)
+            == 0
+            || GetSecurityDescriptorControl(data, &mut control, &mut revision) == 0
+        {
+            return Err(ERROR.into());
+        }
+        let mut flags = DACL_SECURITY_INFORMATION;
+        if control & SE_DACL_PROTECTED != 0 {
+            flags |= PROTECTED_DACL_SECURITY_INFORMATION;
+        }
+        if SetFileSecurityW(path.as_ptr(), flags, data) == 0 {
+            return Err(ERROR.into());
+        }
+    }
+    Ok(())
 }
 
 fn target(root: &Path, name: &str) -> Result<(PathBuf, PathBuf), String> {
@@ -177,6 +257,101 @@ fn target(root: &Path, name: &str) -> Result<(PathBuf, PathBuf), String> {
     Ok((directory, path))
 }
 
+#[cfg(windows)]
+struct WslFile {
+    distro: String,
+    absolute: String,
+}
+
+#[cfg(windows)]
+impl WslFile {
+    fn from_unc(path: &Path) -> Option<Self> {
+        use std::path::{Component, Prefix};
+
+        let mut components = path.components();
+        let Component::Prefix(prefix) = components.next()? else {
+            return None;
+        };
+        let (host, distro) = match prefix.kind() {
+            Prefix::UNC(host, distro) | Prefix::VerbatimUNC(host, distro) => (host, distro),
+            _ => return None,
+        };
+        if !matches!(
+            host.to_str()?.to_ascii_lowercase().as_str(),
+            "wsl.localhost" | "wsl$"
+        ) {
+            return None;
+        }
+        let mut absolute = String::new();
+        for component in components {
+            if let Component::Normal(part) = component {
+                absolute.push('/');
+                absolute.push_str(part.to_str()?);
+            }
+        }
+        Some(Self {
+            distro: distro.to_str()?.into(),
+            absolute,
+        })
+    }
+
+    fn write(&self, version: Option<&str>, contents: &[u8]) -> Result<(), String> {
+        use std::process::Stdio;
+
+        // Windows sees only the read-only flag for an Ubuntu file. Stage and replace in the
+        // distribution to preserve its actual permission bits and POSIX access ACL.
+        const WRITE: &str = r#"
+set -eu
+PATH=/usr/bin:/bin
+umask 077
+file=$1
+expected=$2
+tmp=$(mktemp -- "${file%/*}/${3}XXXXXXXX")
+trap 'rm -f -- "$tmp"' EXIT
+trap 'exit 1' HUP INT TERM
+if [ "$expected" = new ]; then
+    ln --no-target-directory -- "$tmp" "$file" || exit 19
+    exit 0
+fi
+[ -f "$file" ] && [ ! -L "$file" ] || exit 18
+cat > "$tmp"
+[ -f "$file" ] && [ ! -L "$file" ] || exit 18
+cp --attributes-only --preserve=mode --no-target-directory -- "$file" "$tmp"
+sync -d -- "$tmp"
+actual=$(head -c 524289 -- "$file" | sha256sum)
+[ "${actual%% *}" = "$expected" ] || exit 18
+[ -f "$file" ] && [ ! -L "$file" ] || exit 18
+mv --force --no-target-directory -- "$tmp" "$file"
+"#;
+        crate::host::valid_distro(&self.distro)?;
+        let mut command = crate::host::wsl(&self.distro);
+        let mut child = crate::host::quiet(&mut command)
+            .args(["/bin/sh", "-c", WRITE, "agentdock-dotenv"])
+            .arg(&self.absolute)
+            .arg(version.unwrap_or("new"))
+            .arg(STAGING_PREFIX)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| "Could not start the local WSL dotenv save.")?;
+        let write = child
+            .stdin
+            .take()
+            .ok_or("Could not open the local WSL dotenv input.")?
+            .write_all(contents);
+        let status = child
+            .wait()
+            .map_err(|_| "Could not finish the local WSL dotenv save.")?;
+        match status.code() {
+            Some(0) if write.is_ok() => Ok(()),
+            Some(18) => Err(CONFLICT.into()),
+            Some(19) => Err("That dotenv filename already exists or cannot be created.".into()),
+            _ => Err("Could not save the dotenv file in its WSL project folder.".into()),
+        }
+    }
+}
+
 fn valid_name(name: &str) -> bool {
     if name.len() > 240
         || name.trim() != name
@@ -188,7 +363,9 @@ fn valid_name(name: &str) -> bool {
         return false;
     }
     let folded = name.to_ascii_lowercase();
-    if !(folded == ".env" || folded.starts_with(".env.") || folded.ends_with(".env")) {
+    if folded.starts_with(STAGING_PREFIX)
+        || !(folded == ".env" || folded.starts_with(".env.") || folded.ends_with(".env"))
+    {
         return false;
     }
     let base = folded.split('.').next().unwrap_or_default().trim_end();
@@ -515,10 +692,12 @@ fn apply_edits(source: &str, entries: &[Assignment], edits: Vec<Edit>) -> Result
             output.push_str(&source[entry.full.start..entry.key.start]);
             output.push_str(&edit.key);
             output.push_str(&source[entry.key.end..entry.value.start]);
-            if let Some(value) = edit.value {
-                output.push_str(&encode(&value, entry.quote, newline));
-            } else {
-                output.push_str(&source[entry.value.clone()]);
+            let original = &source[entry.value.clone()];
+            match edit.value {
+                Some(value) if value != decode(original, entry.quote) => {
+                    output.push_str(&encode(&value, entry.quote, newline));
+                }
+                _ => output.push_str(original),
             }
             output.push_str(&source[entry.value.end..entry.full.end]);
         } else if let Some(comment) = entry.comment {
@@ -716,6 +895,19 @@ mod tests {
         }
         fs::write(&path, vec![b'x'; MAX_BYTES + 1]).unwrap();
         assert!(read(directory.path(), ".env").is_err());
+    }
+
+    #[test]
+    fn preserves_opaque_text_and_rejects_edits_that_would_swallow_a_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(".env");
+        let source = "A=value\nB=\"unclosed\nKEEP=opaque";
+        fs::write(&path, source).unwrap();
+        let original = read(directory.path(), ".env").unwrap();
+        assert_eq!(original.rows.len(), 1);
+        let edits = vec![change(0, "A", None), add("C", "new")];
+        assert!(save(directory.path(), ".env", &original.version, edits).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), source);
     }
 
     #[cfg(unix)]
