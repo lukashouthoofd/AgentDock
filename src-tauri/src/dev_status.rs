@@ -123,25 +123,6 @@ fn project_location(path: &str, distro: &str) -> Result<Location> {
     if path == "~" || path.starts_with("~/") {
         return Err("Open the folder in AgentDock before using the development panel.".into());
     }
-    #[cfg(windows)]
-    if path.strip_prefix(r"\\?\").unwrap_or(path).as_bytes().get(1) == Some(&b':') {
-        // The project's native path is already known. Bound the optional WSL translation too.
-        let mut location = host::resolve(path, "", true)?;
-        if host::valid_distro(distro).is_ok() {
-            let mut command = host::wsl(distro);
-            if let Ok(report) = run(
-                command.args(["/usr/bin/wslpath", "-a", "-u", &location.native]),
-                "Ubuntu",
-            ) {
-                let path = report.text.trim_end_matches(['\r', '\n']);
-                if report.status.success() && path.starts_with('/') {
-                    location.distro = Some(distro.into());
-                    location.linux = Some(path.into());
-                }
-            }
-        }
-        return Ok(location);
-    }
     host::resolve(path, distro, true)
 }
 
@@ -265,7 +246,7 @@ exec "$executable" "$@"
             "-c",
             script,
             "agentdock-development",
-            location.git_path(),
+            location.linux.as_deref().unwrap_or(location.git_path()),
             binary,
         ]);
         command

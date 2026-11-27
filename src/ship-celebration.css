@@ -21,7 +21,7 @@
   margin-inline: auto;
   box-sizing: border-box;
   overflow: clip;
-  padding: 14px 16px 9px;
+  padding: 16px 16px 8px;
   border: 1px solid var(--ship-border);
   border-radius: 9px;
   background: var(--ship-paper);
@@ -104,7 +104,7 @@
   inset-inline-end: 10px;
   display: flex;
   align-items: flex-end;
-  column-gap: 5px;
+  column-gap: 4px;
   animation: ship-arrive 1500ms cubic-bezier(.15, .72, .3, 1) both;
 }
 

@@ -13,7 +13,7 @@ AgentDock is one Tauri 2 window with a bundled vanilla JavaScript interface host
 | [Windows Terminal](https://github.com/microsoft/terminal) | MIT | Native Windows terminal, ConPTY and WSL | Native comparison baseline. Its Windows application shell is a large customization boundary. |
 | [xterm.js](https://github.com/xtermjs/xterm.js) | MIT | Renderer in WebView2 | Reuse renderer, search, fit, Unicode and URL addons. |
 | [Termigo](https://github.com/99apps-id/termigo) | Apache-2.0 | Tauri, portable-pty, Windows and WSL | Its PTY output bounds are relevant. Full fork includes a generalized AI/editor/backend surface. |
-| [Pebrel](https://github.com/pebrel/pebrel) | GPL-3.0 | Native Rust/GPUI and WSL | Native option with a larger upstream feature and licensing boundary. |
+| [Pebrel](https://github.com/Kuddev/pebrel) | GPL-3.0 | Native Rust/GPUI and WSL | Native option with a larger upstream feature and licensing boundary. |
 
 GitHub listings and repository inspection on November 27, 2026 showed recent activity in the six requested repositories. GitHub advisory results and inspected launch surfaces are limited evidence. Upstream installer sizes cannot establish comparable workstation process-tree memory, and no matched six-project measurement was available. The shipped dependencies carry their upstream license obligations. No application source was copied from the evaluated workspaces.
 

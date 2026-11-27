@@ -23,19 +23,21 @@
       }
     ],
     "security": {
-      "csp": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost; frame-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; media-src 'self'; connect-src ipc: http://ipc.localhost; frame-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico", "icons/icon.png"],
+    "resources": { "../THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt" },
     "shortDescription": "Local terminal workspace for engineering agents",
     "windows": {
       "webviewInstallMode": { "type": "skip" },
       "nsis": {
         "installMode": "currentUser",
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "installer-hooks.nsh"
       }
     }
   }
