@@ -6,12 +6,9 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { busy, button, confirmAction, el, input, reportError } from './ui.js';
+import { terminalSpec, usesTmux } from './model.js';
 
 const binary = new TextEncoder();
-
-export function specFor(session, launcher) {
-  return { id: session.id, path: session.path, distro: session.distro, profile: session.profile, launcher };
-}
 
 export class TerminalView {
   constructor(session, settings, onState, actions) {
@@ -147,6 +144,11 @@ export class TerminalView {
       this.showFeedback(failure, 'retry');
       return;
     }
+    const slowStart = starting && usesTmux(this.session) ? setTimeout(() => {
+      if (this.mounted && epoch === this.epochCounter && !this.connected) {
+        this.showFeedback('Waiting for Ubuntu to start this tmux terminal…');
+      }
+    }, 3000) : undefined;
     const previous = this.attachment.catch(() => {});
     this.attachment = previous.then(async () => {
       if (starting) await starting;
@@ -155,23 +157,36 @@ export class TerminalView {
       this.cols = this.term.cols;
       this.rows = this.term.rows;
       const { cursor, attachment } = await invoke('terminal_attach', {
-        spec: specFor(this.session), cols: this.cols, rows: this.rows,
+        spec: terminalSpec(this.session), cols: this.cols, rows: this.rows,
       });
       if (!this.mounted || epoch !== this.epochCounter) return;
       this.nonce = attachment;
-      this.connected = true;
-      this.feedback.hidden = true;
-      this.onState(this.session.id, 'attached');
+      if (usesTmux(this.session)) {
+        this.transportStarted = Date.now();
+        this.showFeedback('Connecting to tmux…');
+        this.connectionTimer = setTimeout(() => {
+          if (this.mounted && epoch === this.epochCounter && !this.connected) {
+            this.showFeedback('The tmux client has not responded. Reconnect to try again.', 'retry');
+          }
+        }, 85000);
+      } else this.markConnected();
       this.pump(epoch, attachment, this.cursor ?? cursor);
     }).catch(error => {
       if (this.mounted && epoch === this.epochCounter) {
         const message = String(error);
-        const action = this.session.profile === 'powershell' && message.startsWith('This PowerShell terminal has ended.')
+        const action = !usesTmux(this.session) && message.startsWith('This PowerShell terminal has ended.')
           ? 'replace' : 'retry';
         this.showFeedback(message, action);
         this.onState(this.session.id, 'unavailable', String(error));
       }
-    });
+    }).finally(() => clearTimeout(slowStart));
+  }
+
+  markConnected() {
+    clearTimeout(this.connectionTimer);
+    this.connected = true;
+    this.feedback.hidden = true;
+    this.onState(this.session.id, 'attached');
   }
 
   async pump(epoch, attachment, cursor) {
@@ -189,17 +204,28 @@ export class TerminalView {
         }
         if (bytes.length > 9) {
           await new Promise(resolve => this.term.write(bytes.subarray(9), resolve));
+          if (!this.mounted || epoch !== this.epochCounter) return;
+          if (!this.connected && !(flags & 1)) this.markConnected();
           this.onState(this.session.id, 'output');
         }
         this.cursor = cursor;
         if (flags & 1) {
+          this.transportStarted = 0;
+          clearTimeout(this.connectionTimer);
           this.connected = false;
-          this.onState(this.session.id, 'ended');
+          if (usesTmux(this.session)) {
+            this.showFeedback('The tmux client detached. Reconnect to continue.', 'retry');
+            this.onState(this.session.id, 'detached');
+          } else {
+            this.onState(this.session.id, 'ended');
+          }
           return;
         }
       }
     } catch (error) {
       if (this.mounted && epoch === this.epochCounter) {
+        this.transportStarted = 0;
+        clearTimeout(this.connectionTimer);
         this.connected = false;
         this.showFeedback(String(error), 'retry');
         this.onState(this.session.id, 'unavailable', String(error));
@@ -238,17 +264,17 @@ export class TerminalView {
     const navigate = (backward, history = false) => {
       if (!query.value) return;
       if (history) {
-        invoke('terminal_search', { spec: specFor(this.session), query: query.value, backward }).then(close).catch(reportError);
+        invoke('terminal_search', { spec: terminalSpec(this.session), query: query.value, backward }).then(close).catch(reportError);
       } else if (backward) this.search.findPrevious(query.value);
       else this.search.findNext(query.value);
     };
     this.findBar = el('div', { class: 'terminal-find' }, query,
       button('Previous', () => navigate(true)), button('Next', () => navigate(false)),
-      this.session.profile === 'ubuntu' ? button('tmux history', () => navigate(true, true)) : null,
+      usesTmux(this.session) ? button('tmux history', () => navigate(true, true)) : null,
       button('Close search', close, { icon: 'x', only: true }));
     query.addEventListener('keydown', event => {
       if (event.key === 'Escape') { event.stopPropagation(); close(); }
-      if (event.key === 'Enter') navigate(event.shiftKey, event.altKey && this.session.profile === 'ubuntu');
+      if (event.key === 'Enter') navigate(event.shiftKey, event.altKey && usesTmux(this.session));
     });
     this.root.append(this.findBar);
     query.focus();
@@ -257,11 +283,13 @@ export class TerminalView {
   conceal() {
     if (!this.mounted) return this.attachment;
     this.mounted = false;
+    this.transportStarted = 0;
+    clearTimeout(this.connectionTimer);
     this.connected = false;
     this.epochCounter++;
     this.root.remove();
     this.attachment = this.attachment.catch(() => {}).then(() =>
-      invoke('terminal_conceal', { spec: specFor(this.session) })).catch(() => {});
+      invoke('terminal_conceal', { spec: terminalSpec(this.session) })).catch(() => {});
     return this.attachment;
   }
 

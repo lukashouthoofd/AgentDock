@@ -51,6 +51,13 @@ pub struct Container {
     ports: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Containers {
+    source: &'static str,
+    items: Vec<Container>,
+}
+
 struct Report {
     status: ExitStatus,
     text: String,
@@ -299,28 +306,46 @@ pub fn pulls(path: &str, distro: &str) -> Result<Vec<Pull>> {
         .map_err(|_| "GitHub CLI returned an unexpected format.".into())
 }
 
-pub fn containers(path: &str, distro: &str) -> Result<Vec<Container>> {
+pub fn containers(path: &str, distro: &str) -> Result<Containers> {
     const FORMAT: &str = r#"{"name":{{json .Names}},"image":{{json .Image}},"status":{{json .Status}},"ports":{{json .Ports}}}"#;
     let location = project_location(path, distro)?;
-    let report = cli(
-        &location,
-        "docker",
-        &["ps", "--format", FORMAT],
-        "Docker CLI",
-    )?;
-    if !report.status.success() {
-        return Err("Could not reach the Docker engine for this project environment.".into());
-    }
-    report
+    let args = ["ps", "--format", FORMAT];
+    let report = cli(&location, "docker", &args, "Docker CLI");
+    let (report, source) = match report {
+        Ok(report) if report.status.success() => (
+            report,
+            if location.distro.is_some() {
+                "Ubuntu Docker context"
+            } else {
+                "Windows Docker context"
+            },
+        ),
+        _ => {
+            let executable = windows_tool("docker", &location)
+                .ok_or("Could not reach the Docker engine for this project environment.")?;
+            let mut command = Command::new(executable);
+            command
+                .env_remove("DOCKER_CONTEXT")
+                .env_remove("DOCKER_HOST")
+                .args(["--host", "npipe:////./pipe/dockerDesktopLinuxEngine"])
+                .args(args);
+            let report = run(&mut command, "Windows Docker CLI")?;
+            if !report.status.success() {
+                return Err("Could not reach the Docker engine for this project environment or local Docker Desktop.".into());
+            }
+            (report, "Local Windows Docker Desktop")
+        }
+    };
+    let items = report
         .text
         .lines()
         .filter(|line| !line.trim().is_empty())
         .take(LIST_LIMIT)
         .map(|line| {
-            serde_json::from_str(line)
-                .map_err(|_| "Docker CLI returned an unexpected format.".into())
+            serde_json::from_str(line).map_err(|_| "Docker CLI returned an unexpected format.")
         })
-        .collect()
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(Containers { source, items })
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ The Development panel shows local branches, the checked-out branch and known wor
 
 Load pull requests runs the project environment’s existing GitHub CLI against its configured repository remote. The panel displays up to 25 open pull requests and links to their pages in the system browser. It uses existing CLI authentication. A Windows project visible from Ubuntu uses the Ubuntu toolchain. Windows-only paths use the available Windows tools.
 
-Load containers runs the existing Docker CLI’s read-only container-list command in the configured context. It shows running container names, images, status and ports.
+Load containers runs the existing Docker CLI’s read-only container-list command in the configured context. It shows running container names, images, status and ports. If the project environment cannot reach its engine, AgentDock can read the local Windows Docker Desktop Linux engine through its named pipe. The panel shows which engine supplied the result.
 
 These reads run on demand with per-command deadlines and a bounded output buffer. Results live in the open panel’s memory. CLI errors use generic messages and may require a working remote, existing GitHub CLI access or a reachable Docker daemon. The panel displays up to 60 local branches, worktrees or containers per listing.
 

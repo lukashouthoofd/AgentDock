@@ -43,6 +43,8 @@ pub fn output(command: &mut Command) -> Result<Output> {
         .map_err(|error| format!("Could not start the requested tool ({:?}).", error.kind()))
 }
 
+pub const HELPER_TIMEOUT: &str = "The local Ubuntu helper timed out. Retry the terminal operation.";
+
 pub fn output_bounded(command: &mut Command, limit: Duration) -> Result<Output> {
     const MAX_OUTPUT: u64 = 1024 * 1024;
     let mut stdout = tempfile::tempfile().map_err(|_| "Could not allocate local command output.")?;
@@ -61,7 +63,7 @@ pub fn output_bounded(command: &mut Command, limit: Duration) -> Result<Output> 
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(if outcome.is_err() { "Could not monitor the local terminal helper." }
-                    else { "The local Ubuntu helper timed out. Retry the terminal operation." }.into());
+                    else { HELPER_TIMEOUT }.into());
             }
         }
     };

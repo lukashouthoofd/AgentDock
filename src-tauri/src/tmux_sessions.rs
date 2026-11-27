@@ -130,6 +130,15 @@ pub fn discover(distro: &str) -> Result<Snapshot> {
     Ok(snapshot)
 }
 
+pub fn managed_attach_args(id: &str) -> Result<Vec<String>> {
+    if !valid_id(id) {
+        return Err("Invalid managed tmux session identity.".into());
+    }
+    let mut args = helper_args("attach-managed");
+    args.push(format!("ad-{id}"));
+    Ok(args)
+}
+
 /// Returns arguments following WSL --exec. The helper checks the target again immediately before
 /// exec, preserves the caller's terminal, and passes only the supported exact-target operations.
 pub fn guarded_args(identity: &SessionIdentity, command_args: &[&str]) -> Result<Vec<String>> {
@@ -532,6 +541,24 @@ if mode == "discover":
         else:
             panes = sessions[0]["panes"]
             del panes[len(panes) // 2:]
+elif mode == "attach-managed":
+    path = managed_socket()
+    descriptor = pin_socket(path) if path else None
+    if descriptor is not None:
+        try:
+            lines = query(descriptor, time.monotonic() + 2)
+            for line in lines or ():
+                row = line.split(SEPARATOR)
+                if len(row) != len(FIELDS) or number(row[0]) != UID or row[6] != sys.argv[2]:
+                    continue
+                pid = number(row[1])
+                if pid and identifier(row[2], "$") and server_start(pid) and path in server_sockets(pid, listeners())[0]:
+                    os.set_inheritable(descriptor, True)
+                    os.execv(TMUX, tmux(pinned_path(descriptor)) + ["attach-session", "-t", row[2]])
+        finally:
+            os.close(descriptor)
+    print("The managed tmux session is unavailable. Refresh its details before retrying.", file=sys.stderr)
+    sys.exit(1)
 elif mode == "action":
     path, boot, pid, started, session, created = sys.argv[2:8]
     pane, window, action = sys.argv[8], sys.argv[9], sys.argv[10:]

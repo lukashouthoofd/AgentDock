@@ -147,7 +147,16 @@ async function terminateActive(page) {
   await page.locator('.pane[data-session="' + id + '"]').waitFor({ state: 'hidden', timeout: 100000 });
 }
 
+async function restoreFixtureWindow(page) {
+  const minimized = () => page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:window|is_minimized', { label: 'main' }));
+  if (!await minimized()) return;
+  const script = `[void](Add-Type -Name AgentDockFixtureWindow -Namespace QA -PassThru -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindowAsync(System.IntPtr hWnd, int nCmdShow);'); $p=Get-Process -Id ${launched.pid}; [void][QA.AgentDockFixtureWindow]::ShowWindowAsync($p.MainWindowHandle,9)`;
+  await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 12000 });
+  await until(async () => !await minimized(), 'restore the disposable QA window', 15000);
+}
+
 async function command(page, value) {
+  await restoreFixtureWindow(page);
   await tty(page).focus();
   await page.keyboard.insertText(value);
   await page.keyboard.press('Enter');
@@ -171,8 +180,13 @@ async function openProject(page, folder, fromSidebar = false) {
 async function newShell(page, title = 'Blank terminal') {
   await page.getByRole('navigation', { name: 'Terminal tabs' }).getByRole('button', { name: 'New terminal' }).click();
   await page.getByRole('dialog', { name: 'New terminal' }).getByRole('button', { name: title, exact: true }).click();
+  await restoreFixtureWindow(page);
   await tty(page).waitFor({ state: 'attached', timeout: 20000 });
-  await until(() => page.locator('.pane.active .terminal-feedback:visible').count().then(count => count === 0), 'terminal attachment', 30000);
+  await until(() => page.locator('.pane.active .terminal-feedback:visible').count().then(count => count === 0), 'terminal attachment', 125000);
+  if (title === 'Blank terminal') {
+    await until(async () => /[$#%❯›>]\s*$/.test((await buffer(page).textContent({ timeout: 1500 }))?.trimEnd() || ''),
+      'interactive Ubuntu shell prompt', 90000);
+  }
 }
 
 async function dockToEdge(page, source, terminal, edge, order) {
@@ -193,6 +207,29 @@ async function sample(label, count, startup, browserProfile) {
     `& '${measure.replaceAll("'", "''")}' -RootProcessId ${launched.pid} -RootExecutable '${exe.replaceAll("'", "''")}' -Label AgentDock -TerminalCount ${count} -StartupMilliseconds ${startup} -WebViewUserDataDirectory '${browserProfile.replaceAll("'", "''")}' -Samples 7 -IntervalSeconds 2 -QuietSeconds 4 -Proportional | ConvertTo-Json -Depth 6`],
   { timeout: 120000, maxBuffer: 1024 * 1024 });
   await writeFile(join(evidence, 'agentdock-' + label + '.json'), stdout);
+  if (!count) return;
+  const workspace = JSON.parse(await readFile(profile, 'utf8'));
+  const expected = new Set(Object.values(workspace.sessions)
+    .filter(session => session.profile === 'ubuntu' && fixturePaths.has(session.path))
+    .map(session => 'ad-' + session.id));
+  try {
+    const panes = await wsl(['/usr/bin/tmux', '-L', 'agentdock-v1', 'list-panes', '-a', '-F',
+      '#{session_name}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}']);
+    const pids = panes.stdout.trim().split(/\r?\n/).flatMap(row => {
+      const [name, pid, dead, program] = row.split('\t');
+      return expected.has(name) && dead === '0' && program === 'bash' && /^\d+$/.test(pid) ? [pid] : [];
+    });
+    if (pids.length === count) {
+      const rss = await wsl(['/usr/bin/ps', '-o', 'rss=', '-p', pids.join(',')]);
+      const samples = rss.stdout.trim().split(/\s+/).map(Number);
+      if (samples.length === count && samples.every(value => Number.isFinite(value) && value > 0)) {
+        const bashRssMiB = samples.reduce((total, current) => total + current, 0) / 1024;
+        await writeFile(join(evidence, 'agentdock-' + label + '-linux.json'), JSON.stringify({ count, bashRssMiB }));
+      }
+    }
+  } catch {
+    console.log('INFO Linux shell RSS unavailable for this Windows sample');
+  }
 }
 
 async function captureWorkspace() {
@@ -550,6 +587,7 @@ async function checkDesktop() {
   result('Native WebView2 Tux clip decoded, playback and skip');
   await sample('idle', 0, startup, browserProfile);
   result('Native window in ' + startup + ' ms and workspace observed through CDP in ' + ready + ' ms');
+  await restoreFixtureWindow(page);
   await openProject(page, ubuntu, true);
   await newShell(page);
   await command(page, "export ADKEEP=keep; printf '\\033[31mAD%s λ雪\\033[0m\\n' 'ANSI'; pwd");
@@ -702,6 +740,10 @@ async function checkDesktop() {
   await until(() => dev.getByRole('button', { name: 'Refresh' }).count().then(count => count > 1), 'GitHub CLI response');
   await dev.getByRole('button', { name: 'Load containers' }).click();
   await until(() => dev.getByRole('button', { name: 'Refresh' }).count().then(count => count > 2), 'Docker CLI response');
+  if (process.env.AGENTDOCK_REQUIRE_DOCKER === '1') {
+    await dev.getByText(/^(Local Windows Docker Desktop|Ubuntu Docker context|Windows Docker context)$/).waitFor();
+    result('Development panel connected to the existing Docker engine');
+  }
   await dev.getByRole('button', { name: 'Done' }).click();
   result('CLI-based worktree, branch and on-demand Docker panel');
 
@@ -720,6 +762,7 @@ async function checkDesktop() {
   await toolbar(page, 'Clone').click();
   const clone = page.getByRole('dialog', { name: 'Clone repository' });
   await clone.getByLabel('Repository URL or path').fill(ubuntu);
+  assert.equal(await clone.getByLabel('New folder').inputValue(), '~/projects/' + projectName(ubuntu));
   await clone.getByLabel('New folder').fill(ubuntu + '-clone');
   await clone.getByRole('button', { name: 'Clone' }).click();
   await clone.waitFor({ state: 'hidden', timeout: 30000 });
@@ -828,6 +871,7 @@ try {
 }
 
 async function cmdAfterMount(page, value) {
+  await restoreFixtureWindow(page);
   await tty(page).waitFor({ state: 'attached', timeout: 20000 });
   await until(() => page.locator('.pane.active .terminal-feedback:visible').count().then(count => count === 0), 'terminal reattachment');
   await command(page, value);

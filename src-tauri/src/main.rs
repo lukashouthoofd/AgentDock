@@ -9,6 +9,7 @@ mod prompt_studio;
 mod spotify_api;
 mod stats;
 mod terminal;
+mod tmux_sessions;
 mod workspace;
 
 use host::Result;
@@ -16,7 +17,7 @@ use serde_json::Value;
 use spotify_api::{SpotifyApi, SpotifyKind, SpotifyPage};
 use std::{path::PathBuf, sync::Arc};
 use tauri::{ipc::{Channel, Response}, Manager, State};
-use terminal::{Health, Spec, Start, Terminals};
+use terminal::{Inventory, Spec, Start, Terminals};
 use workspace::{Template, TemplateEdit, Workspace};
 
 async fn blocking<T: Send + 'static>(
@@ -50,7 +51,7 @@ async fn dev_pulls(path: String, distro: String) -> Result<Vec<dev_status::Pull>
 }
 
 #[tauri::command]
-async fn dev_containers(path: String, distro: String) -> Result<Vec<dev_status::Container>> {
+async fn dev_containers(path: String, distro: String) -> Result<dev_status::Containers> {
     blocking(move || dev_status::containers(&path, &distro)).await
 }
 
@@ -188,12 +189,18 @@ async fn terminal_search(
 }
 
 #[tauri::command]
-async fn terminal_health(
+async fn terminal_inventory(
     state: State<'_, Arc<Terminals>>,
     distros: Vec<String>,
-) -> Result<Vec<Health>> {
+    tracked: Vec<Spec>,
+) -> Result<Inventory> {
     let state = state.inner().clone();
-    blocking(move || Ok(state.health(distros))).await
+    blocking(move || Ok(state.inventory(distros, tracked))).await
+}
+
+#[tauri::command]
+async fn terminal_tmux_action(identity: tmux_sessions::SessionIdentity, args: Vec<String>) -> Result<()> {
+    blocking(move || terminal::tmux_action(identity, args)).await
 }
 
 #[tauri::command]
@@ -463,7 +470,8 @@ fn main() {
             terminal_read,
             terminal_write,
             terminal_resize,
-            terminal_health,
+            terminal_inventory,
+            terminal_tmux_action,
             terminal_search,
             terminal_active_powershell,
             terminal_attention_ping,

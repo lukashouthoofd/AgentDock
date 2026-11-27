@@ -1,5 +1,6 @@
 import { busy, button, confirmAction, dialog, el, field, icon, input, safeColor, select } from './ui.js';
 import './session-view.css';
+import { moveListFocus } from './keyboard.js';
 
 const kinds = {
   blank: 'Ubuntu shell',
@@ -39,8 +40,11 @@ function snapshot(row, now) {
     kind: kinds[row.kind] || '',
     label: row.label || 'Unobserved',
     tone: tones.has(row.tone) ? row.tone : '',
+    external: row.external === true,
+    tmux: row.tmux === true,
     running: row.running === true,
     starting: row.starting === true,
+    canResume: row.canResume === true,
     visible: row.visible === true,
     inLayout: row.inLayout === true || row.visible === true,
     pinned: row.pinned === true,
@@ -55,14 +59,14 @@ function timeNode(time) {
 }
 
 export function createSessionsView({
-  activate, dock, hide, terminate, close, saveLayout, restoreLayout, deleteLayout, acknowledge, settings, pin,
+  activate, dock, hide, terminate, manage, resume, close, saveLayout, restoreLayout, deleteLayout, acknowledge, settings, pin,
 }) {
   const search = input('', {
     type: 'search', placeholder: 'Find a session…', 'aria-label': 'Find sessions', spellcheck: 'false',
   });
   const scope = select([
     ['project-running', 'Running in this project'], ['running', 'Running in all projects'], ['all', 'All sessions'],
-    ['pinned', 'Pinned'], ['attention', 'Needs attention'],
+    ['discovered', 'Discovered tmux sessions'], ['pinned', 'Pinned'], ['attention', 'Needs attention'],
   ], 'project-running', { 'aria-label': 'Filter sessions' });
   const count = el('span', { class: 'session-rail-count' });
   const projectName = el('strong', { class: 'session-rail-ellipsis' });
@@ -100,7 +104,7 @@ export function createSessionsView({
   function draw(row) {
     const active = row.id === activeId;
     const context = [row.project, row.distro, row.workspace].filter(Boolean).join(' / ');
-    const placement = row.visible ? 'Showing' : row.inLayout ? 'Out of view' : 'Hidden';
+    const placement = row.external ? 'Discovered' : row.visible ? 'Showing' : row.inLayout ? 'Out of view' : 'Hidden';
     const run = (name, action, options = {}) => button(name, busy(action), {
       ...options, data: { sessionAction: options.action || name, sessionId: row.id },
     });
@@ -108,8 +112,8 @@ export function createSessionsView({
       if (await action(row.id) !== false) hideOverlay();
     };
     const heading = el('div', {
-      class: 'session-rail-row-heading', draggable: 'true',
-      title: `Drag ${row.title} into the workspace`, data: { paneSource: row.id },
+      class: 'session-rail-row-heading', draggable: String(!row.external),
+      title: row.external ? row.title : `Drag ${row.title} into the workspace`, data: { paneSource: row.id },
       onDragstart: event => {
         if (!event.dataTransfer) return;
         draggingId = row.id;
@@ -142,9 +146,9 @@ export function createSessionsView({
     el('div', { class: 'session-rail-flags' },
       el('span', { class: row.visible ? 'session-rail-visible' : '', text: placement }),
       row.pinned ? el('span', { text: 'Pinned' }) : null,
-      pin ? run(row.pinned ? 'Unpin' : 'Pin', () => pin(row.id, !row.pinned),
+      pin && !row.external ? run(row.pinned ? 'Unpin' : 'Pin', () => pin(row.id, !row.pinned),
         { action: 'pin', title: `${row.pinned ? 'Unpin' : 'Pin'} ${row.title}` }) : null,
-      settings ? run('Quiet-watch settings', () => settings(row.id),
+      settings && !row.external ? run('Quiet-watch settings', () => settings(row.id),
         { action: 'settings', only: true, icon: 'settings-2', title: `Quiet-watch settings for ${row.title}` }) : null),
     row.attention ? el('div', { class: 'session-rail-attention' },
       el('span', { text: row.attention }),
@@ -159,12 +163,15 @@ export function createSessionsView({
       run('Below', follow(id => dock(id, 'rows')), {
         action: 'dock-below', icon: 'split', disabled: active, title: `Place ${row.title} below the focused terminal`,
       }),
-      hide ? run('Hide', () => hide(row.id), {
+      hide && !row.external ? run('Hide', () => hide(row.id), {
         action: 'hide', disabled: !row.inLayout, title: `Hide ${row.title} and keep the terminal session`,
       }) : null,
+      manage && row.tmux ? run('Manage tmux panes', () => manage(row.id),
+        { action: 'tmux', icon: 'ellipsis', only: true }) : null,
       terminate ? run(`Close terminal ${row.title}`, () => terminate(row.id), {
         action: 'terminate', icon: 'x', only: true,
-      }) : null));
+      }) : null,
+      resume && row.canResume && !row.running ? run('Resume agent', () => resume(row.id), { action: 'resume' }) : null));
     item.style.setProperty('--rail-session-color', row.color);
     return item;
   }
@@ -180,6 +187,7 @@ export function createSessionsView({
       const live = row.running || row.starting;
       if (scope.value === 'running' && !live) return false;
       if (scope.value === 'project-running' && (!live || !isCurrent(row))) return false;
+      if (scope.value === 'discovered' && !row.external) return false;
       if (scope.value === 'pinned' && !row.pinned) return false;
       if (scope.value === 'attention' && !row.attention) return false;
       const text = [row.title, row.role, row.project, row.distro, row.workspace, row.path, row.kind, row.label, row.attention]
@@ -247,6 +255,7 @@ export function createSessionsView({
   scope.addEventListener('change', render);
   element.addEventListener('keydown', event => {
     if (event.key === 'Escape') { event.stopPropagation(); close(); }
+    else if (list.contains(event.target)) moveListFocus(event, list.querySelectorAll('[data-session-action="open"]'));
   });
   render();
 

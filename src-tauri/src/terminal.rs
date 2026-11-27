@@ -1,4 +1,8 @@
-use crate::{host, workspace::valid_id};
+use crate::{
+    host,
+    tmux_sessions::{self, Session as TmuxSession, SessionIdentity},
+    workspace::valid_id,
+};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,11 +21,28 @@ const MAX_SESSIONS: usize = 64;
 const SOCKET: &str = "agentdock-v1";
 const WSL_DEADLINE: Duration = Duration::from_secs(12);
 const WSL_CLOSE_DEADLINE: Duration = Duration::from_secs(90);
+const WSL_CREATE_FIRST_ATTEMPT: Duration = Duration::from_secs(20);
+const WSL_CREATE_RETRY: Duration = Duration::from_secs(80);
 const TMUX_ALERT_OPTIONS: &[&str] = &[
-    ";", "set-option", "-g", "monitor-bell", "on",
-    ";", "set-option", "-g", "bell-action", "any",
-    ";", "set-option", "-g", "visual-bell", "off",
-    ";", "set-hook", "-g", "alert-bell[0]",
+    ";",
+    "set-option",
+    "-g",
+    "monitor-bell",
+    "on",
+    ";",
+    "set-option",
+    "-g",
+    "bell-action",
+    "any",
+    ";",
+    "set-option",
+    "-g",
+    "visual-bell",
+    "off",
+    ";",
+    "set-hook",
+    "-g",
+    "alert-bell[0]",
     "set-option -wF @agentdock-bell '#{e|+|:#{?@agentdock-bell,#{@agentdock-bell},0},1}'",
 ];
 type Result<T> = host::Result<T>;
@@ -33,6 +54,8 @@ pub struct Spec {
     pub path: String,
     pub distro: String,
     pub profile: Profile,
+    pub backend: Option<Backend>,
+    pub tmux: Option<SessionIdentity>,
     pub launcher: Option<String>,
 }
 
@@ -43,6 +66,13 @@ pub enum Profile {
     Powershell,
 }
 
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    Tmux,
+    Native,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Health {
@@ -51,9 +81,20 @@ pub struct Health {
     pub running: bool,
     pub exit_code: Option<i64>,
     pub last_output: u64,
+    pub last_activity: u64,
     pub bell: bool,
     pub bell_count: u64,
     pub tmux_confirmed: bool,
+    pub tmux_clients: Option<u32>,
+    pub missing: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Inventory {
+    terminals: Vec<Health>,
+    tmux: Vec<TmuxSession>,
+    complete_distros: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -84,14 +125,44 @@ fn target(id: &str) -> Result<String> {
     }
 }
 
-fn execute_tmux(distro: &str, args: &[&str], failure: &str) -> Result<()> {
-    host::valid_distro(distro)?;
-    let out = host::output_bounded(tmux(distro).args(args), WSL_DEADLINE)?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(failure.into())
+fn matches_session(spec: &Spec, session: &TmuxSession) -> bool {
+    match &spec.tmux {
+        Some(identity) => &session.identity == identity,
+        None => {
+            session.identity.distro == spec.distro
+                && session.managed
+                && session.name == format!("ad-{}", spec.id)
+        }
     }
+}
+
+fn run_guarded(identity: &SessionIdentity, args: &[&str], deadline: Duration) -> Result<()> {
+    let mut command = host::wsl(&identity.distro);
+    command
+        .args(tmux_sessions::guarded_args(identity, args)?)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE");
+    let output = host::output_bounded(&mut command, deadline)?;
+    if output.status.success() {
+        Ok(())
+    } else if host::text(&output.stderr).starts_with("The tmux session or pane changed") {
+        Err("This tmux session changed or is no longer available. Refresh the session list.".into())
+    } else {
+        Err(
+            "tmux could not complete that operation. Refresh the session details before retrying."
+                .into(),
+        )
+    }
+}
+
+pub fn tmux_action(identity: SessionIdentity, args: Vec<String>) -> Result<()> {
+    let args: Vec<_> = args.iter().map(String::as_str).collect();
+    let deadline = match args.as_slice() {
+        ["kill-session"] | ["kill-pane", _] => WSL_CLOSE_DEADLINE,
+        ["rename-session", _] | ["split-window", _, _] | ["select-pane", _, _] => WSL_DEADLINE,
+        _ => return Err("This tmux control is unsupported.".into()),
+    };
+    run_guarded(&identity, &args, deadline)
 }
 
 fn quote_shell(text: &str) -> String {
@@ -99,6 +170,12 @@ fn quote_shell(text: &str) -> String {
 }
 
 impl Spec {
+    fn uses_tmux(&self) -> bool {
+        self.tmux.is_some()
+            || self.profile == Profile::Ubuntu
+            || self.backend == Some(Backend::Tmux)
+    }
+
     fn verify(&self) -> Result<()> {
         target(&self.id)?;
         if self
@@ -108,8 +185,14 @@ impl Spec {
         {
             return Err("Enter a single-line launcher command of at most 4096 bytes.".into());
         }
-        if self.profile == Profile::Ubuntu {
+        if self.uses_tmux() {
             host::valid_distro(&self.distro)?;
+        }
+        if let Some(identity) = &self.tmux {
+            identity.validate()?;
+            if identity.distro != self.distro {
+                return Err("The tmux session belongs to a different Ubuntu distribution.".into());
+            }
         }
         Ok(())
     }
@@ -117,29 +200,27 @@ impl Spec {
     fn create_tmux(&self) -> Result<()> {
         let location = host::resolve(&self.path, &self.distro, false)?;
         let path = location.linux.as_deref().ok_or(
-            "Ubuntu cannot enter this network folder. Select PowerShell for native UNC paths.",
+            "WSL cannot enter this network folder. Choose PowerShell (native compatibility) to open it.",
         )?;
         let name = format!("ad-{}", self.id);
-        let mut args = vec![
-            "new-session",
-            "-d",
-            "-s",
-            &name,
-            "-x",
-            "100",
-            "-y",
-            "30",
-        ];
-        let command = self
-            .launcher
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-            .map(|launcher| {
+        let mut args = vec!["-d", "-s", &name, "-x", "100", "-y", "30"];
+        let launcher = self.launcher.as_deref().filter(|s| !s.trim().is_empty());
+        let command = if self.profile == Profile::Powershell {
+            Some(match launcher {
+                Some(launcher) => format!(
+                    "exec powershell.exe -NoLogo -NoExit -Command {}",
+                    quote_shell(launcher)
+                ),
+                None => "exec powershell.exe -NoLogo".to_owned(),
+            })
+        } else {
+            launcher.map(|launcher| {
                 format!(
                     "exec \"${{SHELL:-/bin/bash}}\" -ilc {}",
                     quote_shell(launcher)
                 )
-            });
+            })
+        };
         if let Some(command) = &command {
             args.push(command);
         }
@@ -161,9 +242,10 @@ impl Spec {
             "on",
             ";",
             "set-option",
-            "-g",
+            "-t",
+            &name,
             "prefix",
-            "None",
+            "C-b",
             ";",
             "set-option",
             "-g",
@@ -190,12 +272,29 @@ impl Spec {
         args.extend_from_slice(TMUX_ALERT_OPTIONS);
         let mut command = host::wsl(&self.distro);
         command
-            .args(["/bin/sh", "-c", "cd -- \"$1\" 2>/dev/null || exit 124; shift; exec \"$@\"", "agentdock", path])
-            .args(tmux_args())
+            .args([
+                "/bin/sh",
+                "-c",
+                r#"cd -- "$1" 2>/dev/null || exit 124
+                    client=$2; socket=$3; shift 3
+                    if [ -n "${WSL_INTEROP:-}" ]; then set -- -e "WSL_INTEROP=$WSL_INTEROP" "$@"; fi
+                    exec "$client" -L "$socket" -f /dev/null new-session "$@""#,
+                "agentdock",
+                path,
+                "/usr/bin/tmux",
+                SOCKET,
+            ])
             .args(args)
             .env_remove("TMUX")
             .env_remove("TMUX_PANE");
-        let output = host::output_bounded(&mut command, WSL_DEADLINE)?;
+        // The name is fixed for both attempts. The first WSL client may have reached tmux
+        // before Windows stopped returning from wsl.exe, so a duplicate is a successful retry.
+        let output = match host::output_bounded(&mut command, WSL_CREATE_FIRST_ATTEMPT) {
+            Err(error) if error == host::HELPER_TIMEOUT => {
+                host::output_bounded(&mut command, WSL_CREATE_RETRY)
+            }
+            outcome => outcome,
+        }?;
         match output.status.code() {
             Some(0) => Ok(()),
             Some(124) => Err("The Ubuntu working directory is missing or unavailable.".into()),
@@ -378,18 +477,29 @@ impl Pty {
         let pair = native_pty_system()
             .openpty(size(cols, rows))
             .map_err(|_| "Could not allocate a terminal.")?;
-        let mut command = if spec.profile == Profile::Ubuntu {
+        let mut command = if spec.uses_tmux() {
             #[cfg(windows)]
             let mut command = {
                 let mut command = CommandBuilder::new(host::system_exe("wsl.exe").into_os_string());
-                command.args(["--distribution", &spec.distro, "--exec"]);
+                command.args([
+                    "--distribution",
+                    &spec.distro,
+                    "--cd",
+                    "/",
+                    "--exec",
+                    "/usr/bin/env",
+                    "TERM=xterm-256color",
+                ]);
                 command
             };
             #[cfg(not(windows))]
             let mut command = CommandBuilder::new("env");
             command.args(["/usr/bin/env", "TERM=xterm-256color"]);
-            command.args(tmux_args());
-            command.args(["attach-session", "-t", &target(&spec.id)?]);
+            if let Some(identity) = &spec.tmux {
+                command.args(tmux_sessions::guarded_args(identity, &["attach-session"])?);
+            } else {
+                command.args(tmux_sessions::managed_attach_args(&spec.id)?);
+            }
             command.env_remove("TMUX");
             command.env_remove("TMUX_PANE");
             command.env_remove("WSLENV");
@@ -491,7 +601,6 @@ pub struct Terminals {
     ptys: Mutex<HashMap<String, Arc<Pty>>>,
     lifecycle: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     next_attachment: AtomicU64,
-    configured_alerts: Mutex<HashSet<String>>,
 }
 
 impl Terminals {
@@ -506,6 +615,10 @@ impl Terminals {
         lock
     }
 
+    fn distro_control(&self, distro: &str) -> Arc<Mutex<()>> {
+        self.lifecycle_lock(&format!("tmux-distro:{distro}"))
+    }
+
     fn register(&self, id: String, pty: Arc<Pty>) -> Result<()> {
         let mut ptys = self.ptys.lock().unwrap();
         if ptys.len() >= MAX_SESSIONS {
@@ -517,6 +630,9 @@ impl Terminals {
 
     pub fn create(&self, spec: Spec, cols: u16, rows: u16) -> Result<Start> {
         spec.verify()?;
+        if spec.tmux.is_some() {
+            return Err("Attach to the existing tmux session to reconnect.".into());
+        }
         let lifecycle = self.lifecycle_lock(&spec.id);
         let _guard = lifecycle.lock().unwrap();
         let existing = self.ptys.lock().unwrap();
@@ -524,7 +640,9 @@ impl Terminals {
             return Err("This terminal already exists or the attachment limit was reached.".into());
         }
         drop(existing);
-        if spec.profile == Profile::Ubuntu {
+        if spec.uses_tmux() {
+            let distro_control = self.distro_control(&spec.distro);
+            let _guard = distro_control.lock().unwrap();
             spec.create_tmux()?;
         } else {
             let pty = Pty::spawn(&spec, cols, rows)?;
@@ -551,6 +669,16 @@ impl Terminals {
         };
         let attachment = self.next_attachment.fetch_add(1, Ordering::Relaxed) + 1;
         if let Some(pty) = existing {
+            if pty.spec.distro != spec.distro
+                || pty.spec.uses_tmux() != spec.uses_tmux()
+                || pty
+                    .spec
+                    .tmux
+                    .as_ref()
+                    .is_some_and(|identity| Some(identity) != spec.tmux.as_ref())
+            {
+                return Err("The terminal reference changed. Detach before reconnecting.".into());
+            }
             pty.attachment.store(attachment, Ordering::Release);
             pty.master
                 .lock()
@@ -565,7 +693,7 @@ impl Terminals {
         if count >= MAX_SESSIONS {
             return Err("The attachment limit was reached.".into());
         }
-        if spec.profile == Profile::Powershell {
+        if !spec.uses_tmux() {
             return Err(
                 "This PowerShell terminal has ended. Open a new terminal to start another shell."
                     .into(),
@@ -586,7 +714,7 @@ impl Terminals {
         spec.verify()?;
         let lifecycle = self.lifecycle_lock(&spec.id);
         let _guard = lifecycle.lock().unwrap();
-        if spec.profile == Profile::Ubuntu {
+        if spec.uses_tmux() {
             let pty = self.ptys.lock().unwrap().remove(&spec.id);
             if let Some(pty) = pty {
                 pty.stop();
@@ -602,7 +730,9 @@ impl Terminals {
         spec.verify()?;
         let lifecycle = self.lifecycle_lock(&spec.id);
         let _guard = lifecycle.lock().unwrap();
-        if spec.profile == Profile::Ubuntu {
+        if let Some(identity) = &spec.tmux {
+            run_guarded(identity, &["kill-session"], WSL_CLOSE_DEADLINE)?;
+        } else if spec.uses_tmux() {
             let status = host::output_bounded(
                 tmux(&spec.distro).args(["kill-session", "-t", &target(&spec.id)?]),
                 WSL_CLOSE_DEADLINE,
@@ -661,39 +791,32 @@ impl Terminals {
 
     pub fn search(&self, spec: Spec, query: &str, backward: bool) -> Result<()> {
         spec.verify()?;
-        if spec.profile != Profile::Ubuntu
+        if !spec.uses_tmux()
             || query.is_empty()
             || query.len() > 512
             || query.contains(['\r', '\n', '\0'])
         {
             return Err("Enter a single-line terminal search term.".into());
         }
-        let pane = format!("{}:", target(&spec.id)?);
-        execute_tmux(
-            &spec.distro,
-            &[
-                "copy-mode",
-                "-t",
-                &pane,
-                ";",
-                "send-keys",
-                "-t",
-                &pane,
-                "-X",
-                if backward {
-                    "search-backward"
-                } else {
-                    "search-forward"
-                },
-                "--",
-                query,
-            ],
-            "tmux could not search the requested terminal.",
-        )
+        let direction = if backward {
+            "search-backward"
+        } else {
+            "search-forward"
+        };
+        let identity = match &spec.tmux {
+            Some(identity) => identity.clone(),
+            None => tmux_sessions::discover(&spec.distro)?
+                .sessions
+                .into_iter()
+                .find(|session| matches_session(&spec, session))
+                .map(|session| session.identity)
+                .ok_or("The tmux session is unavailable for history search.")?,
+        };
+        run_guarded(&identity, &["search", direction, query], WSL_DEADLINE)
     }
 
-    pub fn health(&self, distros: Vec<String>) -> Vec<Health> {
-        let mut out: HashMap<String, Health> = self
+    pub fn inventory(&self, distros: Vec<String>, tracked: Vec<Spec>) -> Inventory {
+        let mut terminals: HashMap<String, Health> = self
             .ptys
             .lock()
             .unwrap()
@@ -705,73 +828,99 @@ impl Terminals {
                     id.clone(),
                     Health {
                         id,
-                        attached: true,
-                        running: status.is_none(),
-                        exit_code: status,
+                        attached: pty.attachment.load(Ordering::Acquire) != 0 && status.is_none(),
+                        running: !pty.spec.uses_tmux() && status.is_none(),
+                        exit_code: if pty.spec.uses_tmux() { None } else { status },
                         last_output: pty.stream.last.load(Ordering::Relaxed),
+                        last_activity: 0,
                         bell: false,
                         bell_count: 0,
                         tmux_confirmed: false,
+                        tmux_clients: None,
+                        missing: false,
                     },
                 )
             })
             .collect();
+        let mut inventory = Inventory {
+            terminals: Vec::new(),
+            tmux: Vec::new(),
+            complete_distros: Vec::new(),
+        };
         let mut seen = HashSet::new();
         for distro in distros.into_iter().take(12) {
-            if host::valid_distro(&distro).is_err() {
+            if !seen.insert(distro.clone()) || host::valid_distro(&distro).is_err() {
                 continue;
             }
-            let mut args = vec![
-                "list-panes",
-                "-a",
-                "-F",
-                "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{window_bell_flag}\t#{window_activity}\t#{@agentdock-bell}",
-            ];
-            if !self.configured_alerts.lock().unwrap().contains(&distro) {
-                args.extend_from_slice(TMUX_ALERT_OPTIONS);
-            }
-            let snapshot = host::output_bounded(tmux(&distro).args(args), WSL_DEADLINE);
-            let Ok(snapshot) = snapshot else { continue };
-            if !snapshot.status.success() {
+            let control = self.distro_control(&distro);
+            let Ok(_guard) = control.try_lock() else {
                 continue;
-            }
-            self.configured_alerts.lock().unwrap().insert(distro);
-            for line in host::text(&snapshot.stdout).lines() {
-                let parts: Vec<_> = line.split('\t').collect();
-                if let [name, dead, status, signal, bell, activity, count] = parts.as_slice() {
-                    let Some(id) = name.strip_prefix("ad-").filter(|id| valid_id(id)) else {
-                        continue;
-                    };
-                    let entry = out.entry(id.into()).or_insert(Health {
-                        id: id.into(),
-                        attached: false,
-                        running: false,
-                        exit_code: None,
-                        last_output: 0,
-                        bell: false,
-                        bell_count: 0,
-                        tmux_confirmed: true,
-                    });
-                    entry.tmux_confirmed = true;
-                    entry.bell |= *bell == "1";
-                    entry.bell_count = entry.bell_count.max(count.parse().unwrap_or(0));
-                    if let Ok(seconds) = activity.parse::<u64>() {
-                        entry.last_output = entry.last_output.max(seconds.saturating_mul(1000));
-                    }
-                    let first = seen.insert(id.to_owned());
-                    entry.running = (!first && entry.running) || *dead == "0";
-                    entry.exit_code = if entry.running {
-                        None
-                    } else {
-                        status
-                            .parse()
-                            .ok()
-                            .or_else(|| (!signal.is_empty()).then_some(128))
-                    };
+            };
+            if let Ok(snapshot) = tmux_sessions::discover(&distro) {
+                if snapshot.complete {
+                    inventory.complete_distros.push(distro);
                 }
+                inventory.tmux.extend(snapshot.sessions);
             }
         }
-        out.into_values().collect()
+        for spec in tracked
+            .into_iter()
+            .take(256)
+            .filter(|spec| spec.uses_tmux() && spec.verify().is_ok())
+        {
+            let session = inventory
+                .tmux
+                .iter()
+                .find(|session| matches_session(&spec, session));
+            let complete = inventory.complete_distros.contains(&spec.distro);
+            if session.is_none() && !complete {
+                continue;
+            }
+            let entry = terminals.entry(spec.id.clone()).or_insert(Health {
+                id: spec.id,
+                attached: false,
+                running: false,
+                exit_code: None,
+                last_output: 0,
+                last_activity: 0,
+                bell: false,
+                bell_count: 0,
+                tmux_confirmed: false,
+                tmux_clients: None,
+                missing: false,
+            });
+            entry.missing = session.is_none();
+            let Some(session) = session else { continue };
+            entry.tmux_confirmed = true;
+            entry.tmux_clients = Some(session.attached);
+            entry.running = session.panes.iter().any(|pane| !pane.dead);
+            if !entry.running {
+                entry.exit_code = session
+                    .panes
+                    .iter()
+                    .find_map(|pane| {
+                        pane.exit_code
+                            .map(i64::from)
+                            .filter(|code| *code != 0)
+                            .or_else(|| pane.exit_signal.as_ref().map(|_| 128))
+                    })
+                    .or_else(|| {
+                        session
+                            .panes
+                            .iter()
+                            .find_map(|pane| pane.exit_code.map(i64::from))
+                    });
+            }
+            for pane in &session.panes {
+                entry.last_activity = entry
+                    .last_activity
+                    .max(pane.window_activity.unwrap_or(0).saturating_mul(1000));
+                entry.bell |= pane.window_bell;
+                entry.bell_count = entry.bell_count.max(pane.bell_count);
+            }
+        }
+        inventory.terminals = terminals.into_values().collect();
+        inventory
     }
 
     pub fn active_powershell(&self) -> usize {
@@ -779,7 +928,7 @@ impl Terminals {
             .lock()
             .unwrap()
             .values()
-            .filter(|pty| pty.spec.profile == Profile::Powershell && pty.active())
+            .filter(|pty| !pty.spec.uses_tmux() && pty.active())
             .count()
     }
 }

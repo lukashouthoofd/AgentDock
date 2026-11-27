@@ -47,6 +47,66 @@ const fullAccessFlag = {
   agy: '--dangerously-skip-permissions',
 };
 
+export function agentProvider(session) {
+  if (!session) return null;
+  const kind = session.agentKind || session.kind;
+  return Object.hasOwn(fullAccessFlag, kind) ? kind : null;
+}
+
+export function validConversation(id) {
+  return typeof id === 'string' && /^[a-z0-9][a-z0-9_.:-]{0,127}$/i.test(id);
+}
+
+export function usesTmux(session) {
+  return Boolean(session?.tmux || session?.backend === 'tmux' || session?.profile === 'ubuntu');
+}
+
+export function terminalSpec(session, launcher) {
+  return {
+    id: session.id, path: session.path, distro: session.distro, profile: session.profile,
+    backend: session.backend, tmux: session.tmux, launcher,
+  };
+}
+
+export function tmuxKey(identity) {
+  return identity && JSON.stringify([identity.distro, identity.socket, identity.bootId, identity.serverPid,
+    identity.serverStarted, identity.sessionId, identity.sessionCreated]);
+}
+
+export function tmuxPane(snapshot) {
+  return snapshot?.panes.find(pane => pane.windowActive && pane.active)
+    || snapshot?.panes.find(pane => !pane.dead) || snapshot?.panes[0];
+}
+
+function linuxPath(path, distro) {
+  if (path.startsWith('/')) return path.replace(/\/+$/, '') || '/';
+  const parts = path.replaceAll('\\', '/');
+  const unc = /^\/\/(?:wsl\.local(?:host)?|wsl\$)\/([^/]+)(\/.*)?$/i.exec(parts);
+  if (unc && unc[1].toLowerCase() === distro.toLowerCase()) return unc[2]?.replace(/\/+$/, '') || '/';
+  const drive = /^([a-z]):\/(.*)$/i.exec(parts);
+  return drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}`.replace(/\/+$/, '') : null;
+}
+
+export function tmuxProject(projects, distro, cwd) {
+  if (!cwd?.startsWith('/')) return undefined;
+  const normalized = cwd.replace(/\/+$/, '') || '/';
+  let best;
+  let length = -1;
+  for (const item of projects) {
+    if (item.distro !== distro) continue;
+    let root = linuxPath(item.path, distro);
+    if (!root) continue;
+    const windows = /^\/mnt\/[a-z](?:\/|$)/i.test(root);
+    const path = windows ? normalized.toLowerCase() : normalized;
+    if (windows) root = root.toLowerCase();
+    if ((path === root || path.startsWith(root === '/' ? '/' : `${root}/`)) && root.length > length) {
+      best = item;
+      length = root.length;
+    }
+  }
+  return best;
+}
+
 function shellArgument(value) {
   return `'${value.replaceAll("'", "'\"'\"'")}'`;
 }
@@ -70,11 +130,23 @@ function agentAttentionOptions(kind) {
   return '';
 }
 
-export function launchCommand(kind, settings) {
+export function launchCommand(kind, settings, agent = undefined) {
   const flag = fullAccessFlag[kind];
   if (!flag) return null;
   let command = settings[kind].trim();
-  if (command.includes('{permissions}')) return command.replace('{permissions}', settings.fullAccess ? flag : '');
+  let conversation = '';
+  if (agent?.id && !validConversation(agent.id)) throw new Error('Enter a valid conversation ID.');
+  if (agent?.resume) {
+    if (kind === 'agy' && !agent.id) throw new Error('Save an Antigravity conversation ID in Terminal details first.');
+    conversation = { claude: '--resume', codex: 'resume', agy: '--conversation' }[kind];
+    if (agent.id) conversation += ' ' + agent.id;
+  } else if (kind === 'claude' && command === 'claude' && agent?.id) {
+    conversation = '--session-id ' + agent.id;
+  }
+  if (command.includes('{permissions}')) {
+    if (conversation) throw new Error('Use a standard launch command or resume with the CLI in a blank terminal.');
+    return command.replace('{permissions}', settings.fullAccess ? flag : '');
+  }
   const attention = kind === command ? agentAttentionOptions(kind) : '';
   if (kind === 'agy' && command === 'agy.exe') {
     command = '& $(if (Test-Path (Join-Path $env:LOCALAPPDATA "agy\\bin\\agy.exe")) { Join-Path $env:LOCALAPPDATA "agy\\bin\\agy.exe" } else { "agy.exe" })';
@@ -82,7 +154,7 @@ export function launchCommand(kind, settings) {
     throw new Error('Place {permissions} after the agent executable in a launch command with shell operators.');
   }
   const permissions = settings.fullAccess && !command.split(/\s+/).includes(flag) ? flag : '';
-  return [command, permissions, attention].filter(Boolean).join(' ');
+  return [command, permissions, attention, conversation].filter(Boolean).join(' ');
 }
 
 export function leaves(tree) {

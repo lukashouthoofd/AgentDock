@@ -95,9 +95,12 @@ export function openDevelopment(project, openWorktree) {
     )))] : []);
 
   const containers = section('Running containers', 'No containers are running in this Docker context.',
-    'Load containers', () => invoke('dev_containers', args), items => items.length ? [list(items.map(item =>
-      listItem(item.name, [item.image, item.status, item.ports].filter(Boolean).join(' / ')),
-    ))] : []);
+    'Load containers', () => invoke('dev_containers', args), ({ source, items }) => [
+      el('p', { class: 'muted', text: source }),
+      items.length ? list(items.map(item => listItem(item.name,
+        [item.image, item.status, item.ports].filter(Boolean).join(' / '))))
+        : el('p', { class: 'muted', text: 'No containers are running in this Docker context.' }),
+    ]);
 
   const ui = dialog('Development', el('div', { class: 'development-panel' },
     repository.content, pulls.content, containers.content), { class: 'development-dialog' });

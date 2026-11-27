@@ -1,3 +1,4 @@
+import { agentProvider, tmuxKey, tmuxPane, tmuxProject } from './model.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { arrangeTerminal, composePrompt, exchangeLeaves, formatBytes, initialModel, launchCommand, leaves,
@@ -92,4 +93,40 @@ test('saved projects keep their pin order and stale pins are ignored', () => {
   const model = initialModel({ ...initialModel(), projects, pinnedProjects: ['c', 'gone', 'b', 'c'] });
   assert.deepEqual(pinnedProjects(model).map(item => item.id), ['c', 'b']);
   assert.deepEqual(pinnedProjects(initialModel({ ...model, pinnedProjects: null })), []);
+});
+
+
+test('tmux identity survives renames and distinguishes a reused socket or session ID', () => {
+  const identity = { distro: 'Ubuntu', socket: '/tmp/tmux-1000/dev', bootId: 'boot', serverPid: 50,
+    serverStarted: 800, sessionId: '$0', sessionCreated: 101 };
+  assert.equal(tmuxKey(identity), tmuxKey({ ...identity, name: 'renamed' }));
+  assert.notEqual(tmuxKey(identity), tmuxKey({ ...identity, serverStarted: 801 }));
+  assert.notEqual(tmuxKey(identity), tmuxKey({ ...identity, sessionCreated: 103 }));
+  const panes = [{ id: '%0', active: true }, { id: '%1', windowActive: true, active: true }];
+  assert.equal(tmuxPane({ panes }).id, '%1');
+});
+
+test('discovered panes match the longest boundary-aware Ubuntu or Windows project path', () => {
+  const distro = 'Ubuntu-24.04';
+  const windows = { distro, path: 'C:\\Code\\One', id: 'win' };
+  const scoped = { distro, path: '/mnt/c/Code/One/nested', id: 'nested' };
+  const linux = { distro, path: '/home/user/Code', id: 'linux' };
+  const projects = [windows, scoped, linux];
+  assert.equal(tmuxProject(projects, distro, '/mnt/c/code/one/NESTED/x').id, 'nested');
+  assert.equal(tmuxProject(projects, distro, '/mnt/c/code/one/x').id, 'win');
+  assert.equal(tmuxProject(projects, distro, '/mnt/c/code/onerous'), undefined);
+  assert.equal(tmuxProject(projects, distro, '/home/user/code'), undefined);
+  assert.equal(tmuxProject(projects, 'Other', '/home/user/Code'), undefined);
+});
+
+test('agent resume launches use the installed agent syntax and reject shell tokens in IDs', () => {
+  const { settings } = initialModel();
+  const id = '257eacfc-03dc-41ee-8caf-04f85f02a3f3';
+  assert.match(launchCommand('claude', settings, { id }), new RegExp(`--session-id ${id}$`));
+  assert.match(launchCommand('claude', settings, { id, resume: true }), new RegExp(`--resume ${id}$`));
+  assert.match(launchCommand('codex', settings, { resume: true }), / resume$/);
+  assert.match(launchCommand('agy', settings, { id, resume: true }), new RegExp(`--conversation ${id}$`));
+  assert.throws(() => launchCommand('codex', settings, { resume: true, id: '"; exit' }), /valid conversation ID/);
+  assert.throws(() => launchCommand('agy', settings, { resume: true }), /conversation ID/);
+  assert.equal(agentProvider({ kind: 'blank', agentKind: 'claude' }), 'claude');
 });

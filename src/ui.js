@@ -57,6 +57,21 @@ export function button(label, action, options = {}) {
   }, options.icon && icon(options.icon), options.only ? null : label);
 }
 
+export function replaceControls(region, ...children) {
+  const focused = document.activeElement;
+  if (!region.contains(focused) || !focused.matches('button')) {
+    region.replaceChildren(...children);
+    return;
+  }
+  const label = button => button.getAttribute('aria-label') || button.title || button.textContent;
+  const name = label(focused);
+  const matches = () => [...region.querySelectorAll('button')].filter(button => label(button) === name);
+  const index = matches().indexOf(focused);
+  region.replaceChildren(...children);
+  const restored = matches()[index];
+  if (restored && !restored.disabled) restored.focus({ preventScroll: true });
+}
+
 export function input(value = '', options = {}) {
   const field = el('input', { ...options });
   field.value = value;
