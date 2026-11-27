@@ -10,7 +10,7 @@ The target is a lightweight installed Windows terminal workspace. Ubuntu on WSL 
 - [x] Exercise the actual Windows release build and resolve the independent review findings.
 - [x] Measure AgentDock, Windows Terminal and VS Code using equivalent local Bash fixtures.
 - [x] Install the current-user release and verify both shortcuts and the installed application.
-- [ ] Publish verified source to the authorized private GitHub repository.
+- [x] Publish verified source to the authorized private GitHub repository.
 
 ## Resume notes
 
@@ -26,4 +26,4 @@ The native verification rerun passed through the terminal, Git, dotenv and workf
 
 The native run also verified saved layout restoration, process-preserving hide, a terminal bell and acknowledgment. A later run captured the actual WSL helper timeout under workstation memory pressure. The current attach path starts the tmux client directly through ConPTY. Health calls coalesce, and the Git observer processes its small batch sequentially and yields to open dialogs and terminal transitions. A subsequent Windows test passed the split and dotenv steps where that timeout had occurred.
 
-The verified native release was bundled into a 2.93 MiB current-user Windows installer. Both shortcuts target the installed binary, and the desktop shortcut uses its icon. The installed app reopened an existing Ubuntu terminal and launched normally through the desktop shortcut. After the local merge tests passed, the exact legacy Windows Claude Ship It registration was removed with a local backup.
+The verified native release was bundled into a 2.93 MiB current-user Windows installer. Both shortcuts target the installed binary, and the desktop shortcut uses its icon. The installed app reopened an existing Ubuntu terminal and launched normally through the desktop shortcut. After the local merge tests passed, the exact legacy Windows Claude Ship It registration was removed with a local backup. The clean source is on the private repository's main branch.
