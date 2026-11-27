@@ -24,6 +24,7 @@ let launched;
 let browser;
 let port = 19281;
 const measure = process.env.AGENTDOCK_MEASURE_SCRIPT;
+let ipcTiming = [];
 
 function result(message) {
   report.push({ name: message, time: new Date().toISOString() });
@@ -74,6 +75,18 @@ async function start() {
   page.on('pageerror', error => console.log('WEBVIEW ERROR ' + error.message));
   page.on('console', message => { if (message.type() === 'error') console.log('WEBVIEW CONSOLE ' + message.text().slice(0, 350)); });
   await page.getByRole('main', { name: 'Terminal workspace' }).waitFor();
+  if (process.env.AGENTDOCK_TRACE_IPC === '1') {
+    ipcTiming = [];
+    const track = phase => request => {
+      const url = new URL(request.url());
+      if (url.hostname !== 'ipc.localhost' || !/^\/(workspace_save|terminal_create|terminal_attach|terminal_conceal)$/.test(url.pathname)) return;
+      ipcTiming.push({ command: url.pathname.slice(1), phase, at: Math.round(performance.now()) });
+      if (ipcTiming.length > 60) ipcTiming.shift();
+    };
+    page.on('request', track('start'));
+    page.on('requestfinished', track('end'));
+    page.on('requestfailed', track('failed'));
+  }
   return { page, startup: nativeStartup, ready: Math.round(performance.now() - launchTime), browserProfile };
 }
 
@@ -109,8 +122,14 @@ async function command(page, value) {
   await page.keyboard.press('Enter');
 }
 
-async function openProject(page, folder) {
-  await toolbar(page, 'Open').click();
+async function openProject(page, folder, fromSidebar = false) {
+  if (fromSidebar) {
+    await page.getByRole('complementary', { name: 'Projects and terminals' })
+      .getByRole('button', { name: 'New project' }).click();
+    const menu = page.getByRole('dialog', { name: 'New project' });
+    await menu.getByRole('button', { name: 'Clone repository' }).waitFor();
+    await menu.getByRole('button', { name: 'Open folder' }).click();
+  } else await toolbar(page, 'Open').click();
   const dialog = page.getByRole('dialog', { name: 'Open project folder' });
   await dialog.getByLabel('Folder path').fill(folder);
   await dialog.getByLabel('Ubuntu distribution').selectOption(distro);
@@ -119,17 +138,29 @@ async function openProject(page, folder) {
 }
 
 async function newShell(page, title = 'Blank terminal') {
-  await toolbar(page, 'New terminal').click();
+  await page.getByRole('navigation', { name: 'Terminal tabs' }).getByRole('button', { name: 'New terminal' }).click();
   await page.getByRole('dialog', { name: 'New terminal' }).getByRole('button', { name: title, exact: true }).click();
   await tty(page).waitFor({ state: 'attached', timeout: 20000 });
   await until(() => page.locator('.pane.active .terminal-feedback:visible').count().then(count => count === 0), 'terminal attachment', 30000);
+}
+
+async function dockToEdge(page, source, terminal, edge, order) {
+  const target = page.locator('.pane[data-session="' + terminal + '"]');
+  const bounds = await target.boundingBox();
+  assert.ok(bounds);
+  const x = edge === 'left' ? 10 : edge === 'right' ? bounds.width - 10 : bounds.width / 2;
+  const y = edge === 'above' ? 10 : edge === 'below' ? bounds.height - 10 : bounds.height / 2;
+  await source.dragTo(target, { targetPosition: { x, y } });
+  const axis = edge === 'left' || edge === 'right' ? 'columns' : 'rows';
+  await until(() => page.locator('.stage > .split.' + axis + ' > .pane').evaluateAll((panes, expected) =>
+    panes.map(pane => pane.dataset.session).join(',') === expected.join(','), order), 'terminal docking ' + edge);
 }
 
 async function sample(label, count, startup, browserProfile) {
   if (!measure) return;
   const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     `& '${measure.replaceAll("'", "''")}' -RootProcessId ${launched.pid} -RootExecutable '${exe.replaceAll("'", "''")}' -Label AgentDock -TerminalCount ${count} -StartupMilliseconds ${startup} -WebViewUserDataDirectory '${browserProfile.replaceAll("'", "''")}' -Samples 7 -IntervalSeconds 2 -QuietSeconds 4 -Proportional | ConvertTo-Json -Depth 6`],
-  { timeout: 45000, maxBuffer: 1024 * 1024 });
+  { timeout: 120000, maxBuffer: 1024 * 1024 });
   await writeFile(join(evidence, 'agentdock-' + label + '.json'), stdout);
 }
 
@@ -155,7 +186,7 @@ try {
   result('Native WebView2 Tux clip decoded, playback and skip');
   await sample('idle', 0, startup, browserProfile);
   result('Native window in ' + startup + ' ms and workspace observed through CDP in ' + ready + ' ms');
-  await openProject(page, ubuntu);
+  await openProject(page, ubuntu, true);
   await newShell(page);
   await command(page, "export ADKEEP=keep; printf '\\033[31mAD%s λ雪\\033[0m\\n' 'ANSI'; pwd");
   await textInTerminal(page, 'ADANSI λ雪');
@@ -175,6 +206,7 @@ try {
   await textInTerminal(page, 'ADCHILD=');
   const childPid = Number((await buffer(page).textContent()).match(/ADCHILD=(\d+)/)?.[1]);
   assert.ok(Number.isInteger(childPid) && alive(childPid), 'controlled PowerShell child process exists');
+  const windowsId = await page.locator('.pane.active').getAttribute('data-session');
   result('Windows folder and interactive PowerShell ConPTY');
   await toolbar(page, 'Worktrees').click();
   const nativeTrees = page.getByRole('dialog', { name: 'Git worktrees' });
@@ -184,6 +216,36 @@ try {
   await page.locator('.pane.active .pane-caption').dragTo(page.locator('[data-tab-id="' + linuxTab + '"]'));
   await until(() => page.locator('.pane').count().then(count => count === 2), 'cross-project split');
   result('Dragged PowerShell across tabs into a split with the Ubuntu terminal');
+  const windowsRow = page.locator('[data-terminal-id="' + windowsId + '"]');
+  const windowsPane = page.locator('.pane[data-session="' + windowsId + '"] .pane-caption');
+  await dockToEdge(page, windowsRow, linuxId, 'left', [windowsId, linuxId]);
+  await dockToEdge(page, windowsPane, linuxId, 'above', [windowsId, linuxId]);
+  await dockToEdge(page, windowsPane, linuxId, 'below', [linuxId, windowsId]);
+  await dockToEdge(page, windowsPane, linuxId, 'right', [linuxId, windowsId]);
+  assert.ok(alive(childPid), 'moving the pane preserved the running Windows process');
+  result('Projects plus and terminal plus are distinct. Sidebar and pane drag dock across projects on all four edges');
+  const terminalTabs = page.getByRole('navigation', { name: 'Terminal tabs' });
+  const sessionsPanel = page.getByRole('complementary', { name: 'Sessions' });
+  await terminalTabs.getByRole('button', { name: 'Sessions' }).click();
+  await sessionsPanel.getByRole('button', { name: 'Layouts' }).click();
+  const layouts = page.getByRole('dialog', { name: 'Layout presets' });
+  await layouts.getByLabel('Name for current layout').fill('Verification split');
+  await layouts.getByRole('button', { name: 'Save current layout' }).click();
+  await layouts.getByText('Verification split', { exact: true }).waitFor();
+  await layouts.getByRole('button', { name: 'Close' }).click();
+  await sessionsPanel.locator('[data-session-action=hide][data-session-id="' + windowsId + '"]').click();
+  await until(() => page.locator('.pane').count().then(count => count === 1), 'session renderer hidden');
+  assert.ok(alive(childPid), 'hiding the pane preserved its process');
+  await sessionsPanel.getByRole('button', { name: 'Layouts' }).click();
+  await layouts.getByRole('button', { name: 'Restore' }).click();
+  await until(() => page.locator('.pane').count().then(count => count === 2), 'saved layout restored');
+  await layouts.waitFor({ state: 'hidden' });
+  if (await page.evaluate(() => matchMedia('(max-width: 1399px)').matches)) {
+    await sessionsPanel.waitFor({ state: 'hidden' });
+  } else {
+    await sessionsPanel.getByRole('button', { name: 'Close sessions' }).click();
+  }
+  result('Sessions rail hides renderers, keeps their processes alive and restores a named layout');
   await page.locator('.pane.active').getByRole('button', { name: 'Terminal actions' }).click();
   await page.getByRole('button', { name: 'Terminate terminal' }).click();
   await page.getByRole('dialog', { name: 'Terminate terminal' }).getByRole('button', { name: 'Terminate' }).click();
@@ -195,6 +257,12 @@ try {
   await cmdAfterMount(page, 'printf "AD%s\\n" "$ADKEEP"');
   await textInTerminal(page, 'ADkeep');
   result('Project switch detached and reattached Ubuntu without replacing its shell');
+  await command(page, "printf '\\a'");
+  await page.locator('.pane.active[data-alert=bell]').waitFor({ timeout: 14000 });
+  await page.locator('.pane.active').getByRole('button', { name: 'Terminal actions' }).click();
+  await page.getByRole('button', { name: 'Acknowledge terminal attention' }).click();
+  await page.locator('.pane.active[data-alert=bell]').waitFor({ state: 'hidden' });
+  result('An actual Ubuntu terminal bell lights the pane and can be acknowledged');
 
   await page.locator('.pane.active').getByRole('button', { name: 'Terminal actions' }).click();
   await page.getByRole('button', { name: 'Split top and bottom' }).click();
@@ -277,9 +345,21 @@ try {
   await sample('ten', 10, startup, browserProfile);
   while (await total() < 20) await newShell(page);
   await until(() => page.getByRole('contentinfo', { name: 'System resources' }).getByText('20', { exact: true }).isVisible(), 'twenty active sessions', 28000);
+  assert.equal(await page.locator('.terminal-renderer').count(), 1);
   await page.screenshot({ path: join(evidence, 'twenty-sessions.png') });
   await captureWorkspace();
   result('Twenty live controlled terminals, single workspace and bounded renderer attachment');
+
+  for (let index = 0; index < 3; index++) {
+    await newShell(page);
+    const pane = page.locator('.pane.active');
+    const id = await pane.getAttribute('data-session');
+    await pane.getByRole('button', { name: 'Terminal actions' }).click();
+    await page.getByRole('button', { name: 'Terminate terminal' }).click();
+    await page.getByRole('dialog', { name: 'Terminate terminal' }).getByRole('button', { name: 'Terminate' }).click();
+    await until(() => page.locator('[data-terminal-id="' + id + '"]').count().then(count => count === 0), 'fixture terminal termination');
+  }
+  result('Three repeated Ubuntu create-and-terminate cycles under the 20-session load');
 
   await openProject(page, windows);
   await newShell(page, 'PowerShell');
@@ -308,6 +388,7 @@ try {
       minimized: await window.__TAURI_INTERNALS__.invoke('plugin:window|is_minimized', { label: 'main' }).catch(() => null),
     })).catch(() => null);
     console.error('Window diagnostic', JSON.stringify(diagnostics));
+    if (ipcTiming.length) console.error('Native IPC timing', JSON.stringify(ipcTiming));
   }
   await faultPage?.screenshot({ path: join(evidence, 'failure.png') }).catch(() => {});
   process.exitCode = 1;

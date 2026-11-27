@@ -58,6 +58,7 @@ export class TerminalView {
     }, { capture: true });
     this.term.parser.registerOscHandler(52, () => true);
     this.term.onData(value => this.send(binary.encode(value)));
+    this.term.onBell(() => this.onState(this.session.id, 'bell'));
     this.term.onBinary(value => this.send(Uint8Array.from(value, character => character.charCodeAt(0))));
     this.term.attachCustomKeyEventHandler(event => {
       if (event.type !== 'keydown') return true;

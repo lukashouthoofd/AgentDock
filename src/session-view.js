@@ -5,6 +5,7 @@ const kinds = {
   blank: 'Ubuntu shell',
   claude: 'Claude Code',
   codex: 'Codex',
+  agy: 'Antigravity',
   powershell: 'PowerShell',
 };
 
@@ -43,7 +44,7 @@ function snapshot(row, now) {
     inLayout: row.inLayout === true || row.visible === true,
     pinned: row.pinned === true,
     attention: typeof row.attention === 'string' ? row.attention : '',
-    output: relativeTime(row.lastOutput, now, 'Output'),
+    output: relativeTime(row.lastOutput, now, 'Activity'),
     quiet: relativeTime(row.quietSince, now, 'Quiet since'),
   };
 }
@@ -106,7 +107,7 @@ export function createSessionsView({
       if (await action(row.id) !== false) hideOverlay();
     };
     const heading = el('div', {
-      class: 'session-rail-row-heading', draggable: true,
+      class: 'session-rail-row-heading', draggable: 'true',
       title: `Drag ${row.title} into the workspace`, data: { paneSource: row.id },
       onDragstart: event => {
         if (!event.dataTransfer) return;
@@ -135,7 +136,7 @@ export function createSessionsView({
         title: [row.role, row.kind].filter(Boolean).join(' / ') }) : null,
       context ? el('span', { class: 'session-rail-ellipsis', text: context, title: context }) : null,
       row.path ? el('span', { class: 'session-rail-ellipsis session-rail-path', text: row.path, title: row.path }) : null,
-      row.output ? timeNode(row.output) : el('span', { text: 'No output observed' }),
+      row.output ? timeNode(row.output) : el('span', { text: 'No activity observed' }),
       row.quiet ? timeNode(row.quiet) : null),
     el('div', { class: 'session-rail-flags' },
       el('span', { class: row.visible ? 'session-rail-visible' : '', text: placement }),

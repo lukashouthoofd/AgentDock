@@ -1,12 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
 import { dotenvEditor, workflowEditor } from './editors.js';
-import { initialModel, leaves, exchangeLeaves, formatBytes, removeTerminal, splitLeaf } from './model.js';
+import { arrangeTerminal, initialModel, launchCommand, leaves, formatBytes, removeTerminal, restoreLayout, splitLeaf } from './model.js';
 import { playIntro } from './intro.js';
 import { openDevelopment } from './dev-status.js';
 import { celebrateShip } from './ship-celebration.js';
 import { openSpotify } from './spotify.js';
+import { openPromptStudio } from './prompt-studio.js';
+import { createSessionsView } from './session-view.js';
 import { $, busy, button, confirmAction, dialog, el, field, icon, input, pathName, reportError, safeColor, select } from './ui.js';
 import './style.css';
 
@@ -18,6 +20,9 @@ const collapsed = new Set();
 const runtime = new Map();
 const health = new Map();
 const paneLabels = new Map();
+const attention = new Map();
+const tmuxBells = new Map();
+const seenQuiet = new Map();
 const app = $('#app');
 const desktop = getCurrentWindow();
 const projectBar = el('header', { class: 'toolbar', 'aria-label': 'Workspace toolbar' });
@@ -28,11 +33,13 @@ const statusBar = el('footer', { class: 'statusbar', 'aria-label': 'System resou
 const notice = el('div', { id: 'notice', class: 'notice', role: 'status', hidden: true },
   el('span', { class: 'notice-message' }), button('Dismiss message', () => { notice.hidden = true; }, { icon: 'x', only: true }));
 const workspace = el('div', { class: 'workspace' }, tabbar, stage);
-app.append(projectBar, el('div', { class: 'workbench' }, sidebar, workspace), statusBar, notice);
+const workbench = el('div', { class: 'workbench' }, sidebar, workspace);
+app.append(projectBar, workbench, statusBar, notice);
 
 let model = initialModel();
 let distros = [];
 let focused = null;
+let focusAfterMount = null;
 let maximized = null;
 let minimized = false;
 let renderRevision = 0;
@@ -61,16 +68,155 @@ const specFor = (session, launcher) => ({
   id: session.id, path: session.path, distro: session.distro, profile: session.profile, launcher,
 });
 const profileName = profile => profile === 'ubuntu' ? 'Ubuntu' : 'PowerShell';
-const launchNames = { blank: 'Blank terminal', claude: 'Claude Code', codex: 'Codex', powershell: 'PowerShell' };
+const launchNames = { blank: 'Blank terminal', claude: 'Claude Code', codex: 'Codex',
+  agy: 'Antigravity (Windows)', powershell: 'PowerShell' };
+const paneDrag = 'application/x-agentdock-pane';
+const tabDrag = 'application/x-agentdock-tab';
+let draggedTerminal;
+let dropTarget;
+
+function clearDropTarget() {
+  if (dropTarget) delete dropTarget.dataset.dropPosition;
+  dropTarget = null;
+}
+
+function draggableTerminal(element, id) {
+  element.draggable = true;
+  element.addEventListener('dragstart', event => {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData(paneDrag, id);
+    draggedTerminal = id;
+  });
+  element.addEventListener('dragend', () => {
+    if (!draggedTerminal) return;
+    draggedTerminal = null;
+    clearDropTarget();
+    paintSidebar();
+  });
+}
+
+function paneDropPosition(event, frame) {
+  const box = frame.getBoundingClientRect();
+  const x = (event.clientX - box.left) / box.width;
+  const y = (event.clientY - box.top) / box.height;
+  const [position, distance] = [['left', x], ['right', 1 - x], ['above', y], ['below', 1 - y]]
+    .reduce((nearest, edge) => edge[1] < nearest[1] ? edge : nearest);
+  return distance < 0.27 ? position : 'center';
+}
+
+function moveTerminal(source, target, position) {
+  const destination = arrangeTerminal(model, source, target, position);
+  if (!destination) return;
+  maximized = null;
+  activate(source);
+}
 
 function save() {
-  const snapshot = structuredClone(model);
+  const snapshot = structuredClone({ ...model, focused, maximized });
   saved = saved.catch(() => {}).then(() => invoke('workspace_save', { model: snapshot }));
   saved.catch(reportError);
   return saved;
 }
 
 function projectDistro() { return model.settings.distro || distros.find(name => /^ubuntu/i.test(name)) || distros[0] || 'Ubuntu'; }
+
+const sessionRail = createSessionsView({
+  activate,
+  dock: (id, axis) => focused && leaves(activeTab()?.tree).includes(focused)
+    ? moveTerminal(id, focused, axis === 'rows' ? 'below' : 'right') : activate(id),
+  hide: detach,
+  close: () => toggleSessions(false),
+  saveLayout: saveCurrentLayout,
+  restoreLayout: applyLayout,
+  deleteLayout: id => {
+    model.layouts = model.layouts.filter(layout => layout.id !== id);
+    paintSessions();
+    return save();
+  },
+  acknowledge: acknowledgeAttention,
+  settings: id => model.sessions[id] && editItem(model.sessions[id], 'terminal'),
+  pin: (id, value) => {
+    const session = model.sessions[id];
+    if (!session) return;
+    session.pinned = value;
+    paintSessions();
+    return save();
+  },
+});
+workbench.append(sessionRail.element);
+
+function toggleSessions(show = !model.sessionsVisible) {
+  model.sessionsVisible = show;
+  paintSessions();
+  tabbar.querySelector('.sessions-toggle')?.setAttribute('aria-pressed', String(show));
+  save();
+  if (show) sessionRail.focus();
+}
+
+function paintSessions() {
+  sessionRail.element.hidden = !model.sessionsVisible;
+  if (sessionRail.element.hidden) return;
+  const inLayout = new Set(model.tabs.flatMap(tab => leaves(tab.tree)));
+  const visible = minimized ? [] : maximized ? [maximized] : leaves(activeTab()?.tree);
+  const rows = Object.values(model.sessions).map(session => {
+    const item = model.projects.find(project => project.id === session.project);
+    const [label, tone] = currentStatus(session);
+    const info = health.get(session.id);
+    const alert = attention.get(session.id);
+    return {
+      id: session.id, title: session.title, role: session.role, color: session.color,
+      project: item?.name, projectId: session.project, path: session.path,
+      distro: session.profile === 'ubuntu' ? session.distro : 'Windows', kind: session.kind, label, tone,
+      lastOutput: Math.max(info?.lastOutput || 0, runtime.get(session.id)?.last || 0),
+      quietSince: alert?.kind === 'quiet' ? alert.since : null,
+      attention: alert?.kind === 'bell' ? 'Terminal bell' : alert ? 'Quiet-watch threshold reached' : null,
+      running: info?.running || runtime.get(session.id)?.state === 'attached',
+      inLayout: inLayout.has(session.id), visible: visible.includes(session.id), pinned: session.pinned,
+    };
+  });
+  sessionRail.update(rows, focused, { project: project(), presets: model.layouts });
+}
+
+function saveCurrentLayout(name) {
+  const existing = model.layouts.find(layout => layout.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+  if (!existing && model.layouts.length >= 32) throw new Error('Delete a saved layout before adding another.');
+  const layout = {
+    id: existing?.id || crypto.randomUUID(), name, tabs: structuredClone(model.tabs),
+    project: model.project, worktree: model.worktree, sidebar: model.sidebar,
+    active: model.active, focused, maximized,
+  };
+  model.layouts = [...model.layouts.filter(item => item.id !== layout.id), layout];
+  paintSessions();
+  return save();
+}
+
+function applyLayout(id) {
+  const layout = model.layouts.find(item => item.id === id);
+  if (!layout) return false;
+  ({ focused, maximized } = restoreLayout(model, layout));
+  const session = model.sessions[focused];
+  model.project = session?.project || layout.project;
+  model.worktree = session ? (session.path === project()?.path ? null : session.path) : layout.worktree;
+  render();
+  return save();
+}
+
+function markAttention(id, kind, since = Date.now()) {
+  if (attention.get(id)?.kind === kind) return;
+  attention.set(id, { kind, since });
+  paintStatus(id);
+  paintSessions();
+  if (!document.hasFocus()) desktop.requestUserAttention(UserAttentionType.Informational).catch(() => {});
+  if (model.settings.attentionPing) invoke('terminal_attention_ping').catch(() => {});
+}
+
+function acknowledgeAttention(id) {
+  const alert = attention.get(id);
+  if (alert?.kind === 'quiet') seenQuiet.set(id, alert.since);
+  attention.delete(id);
+  paintStatus(id);
+  paintSessions();
+}
 
 function currentStatus(session) {
   const local = runtime.get(session.id);
@@ -89,25 +235,42 @@ function currentStatus(session) {
 
 function mark(id, state, message) {
   const previous = runtime.get(id) || {};
-  if (state === 'output') {
+  if (state === 'bell') {
+    if (model.sessions[id]?.profile === 'powershell') markAttention(id, 'bell');
+  } else if (state === 'output') {
     runtime.set(id, { ...previous, last: Date.now() });
+    if (model.sessions[id]?.profile === 'powershell' && attention.get(id)?.kind === 'quiet') acknowledgeAttention(id);
     if (Date.now() - (previous.last || 0) > 7500) paintStatus(id);
   } else {
     runtime.set(id, { ...previous, state, message });
     paintStatus(id);
+    if (state === 'attached') applyTerminalFocus(id);
   }
+}
+
+function applyTerminalFocus(id) {
+  const terminal = view.get(id);
+  if (focusAfterMount !== id || focused !== id || !terminal?.connected || !terminal.root.isConnected) return;
+  focusAfterMount = null;
+  if (!$('dialog[open]')) terminal.focus();
 }
 
 function paintStatus(id) {
   const session = model.sessions[id];
   if (!session) return;
   const [label, tone] = currentStatus(session);
+  const status = attention.get(id)?.kind;
   for (const element of [paneLabels.get(id), ...sidebar.querySelectorAll('[data-status-id]')]) {
     if (!element || element.dataset.statusId !== id) continue;
-    element.textContent = label;
-    element.className = `session-status ${tone}`;
+    element.textContent = status === 'bell' ? 'Bell' : label;
+    element.className = `session-status ${status === 'bell' ? 'bad' : tone}`;
     element.title = runtime.get(id)?.message || label;
+    if (status) element.parentElement.dataset.alert = status;
+    else delete element.parentElement.dataset.alert;
   }
+  const pane = stage.querySelector(`[data-session="${CSS.escape(id)}"]`);
+  if (pane && status) pane.dataset.alert = status;
+  else if (pane) delete pane.dataset.alert;
 }
 
 async function refreshHealth() {
@@ -117,8 +280,25 @@ async function refreshHealth() {
     const records = await invoke('terminal_health', { distros });
     health.clear();
     for (const item of records) health.set(item.id, item);
-    Object.keys(model.sessions).forEach(paintStatus);
+    for (const session of Object.values(model.sessions)) {
+      const info = health.get(session.id);
+      const previousBell = tmuxBells.get(session.id) || 0;
+      const bell = info?.bellCount || (info?.bell ? -1 : 0);
+      if (bell && bell !== previousBell) markAttention(session.id, 'bell');
+      if (info) tmuxBells.set(session.id, bell);
+      const minutes = session.quietWatch;
+      const last = info?.lastOutput || runtime.get(session.id)?.last || 0;
+      if (attention.get(session.id)?.kind === 'quiet' && last > attention.get(session.id).since) {
+        acknowledgeAttention(session.id);
+      }
+      if (minutes && last && info?.running && !attention.has(session.id)
+        && seenQuiet.get(session.id) !== last && Date.now() - last >= minutes * 60000) {
+        markAttention(session.id, 'quiet', last);
+      }
+      paintStatus(session.id);
+    }
   }
+  paintSessions();
   paintStats();
 }
 
@@ -132,6 +312,7 @@ async function refreshGit(item, path = item.path) {
   }
   paintToolbar();
   paintSidebar();
+  paintSessions();
 }
 
 function gitInfo(item, path = item.path) { return worktreeInfo.get(`${item.id}\n${path}`); }
@@ -149,7 +330,7 @@ function chooseProject(item, path = null) {
     session.project === item.id && (!path || session.path === path) &&
     model.tabs.some(tab => leaves(tab.tree).includes(session.id)))?.id;
   if (candidate) activate(candidate, false);
-  else { paintToolbar(); paintSidebar(); }
+  else { paintToolbar(); paintSidebar(); paintSessions(); }
   save();
   refreshGit(item);
   if (path && path !== item.path) refreshGit(item, path);
@@ -163,15 +344,15 @@ function activate(id, updateProject = true) {
     tab = { id: crypto.randomUUID(), tree: { id } };
     model.tabs.push(tab);
   }
-  if (model.active !== tab.id) maximized = null;
+  if (maximized !== id) maximized = null;
   model.active = tab.id;
   focused = id;
+  focusAfterMount = id;
   if (updateProject) {
     model.project = session.project;
     model.worktree = session.path === project()?.path ? null : session.path;
   }
   render();
-  view.get(id)?.focus();
   save();
 }
 
@@ -183,7 +364,9 @@ function focusPane(id) {
   model.worktree = project()?.path === session.path ? null : session.path;
   paintToolbar();
   paintSidebar();
+  paintSessions();
   for (const pane of stage.querySelectorAll('.pane')) pane.classList.toggle('active', pane.dataset.session === id);
+  save();
 }
 
 function makeTab(id) {
@@ -196,7 +379,8 @@ async function newTerminal(kind = 'blank', axis, item = project(), path = rootPa
   if (closing) return;
   if (!item) { await openProject(); return; }
   if (Object.keys(model.sessions).length >= 64) throw new Error('Remove an unused terminal before opening another.');
-  const profile = kind === 'powershell' ? 'powershell' : 'ubuntu';
+  const profile = kind === 'powershell' || kind === 'agy' ? 'powershell' : 'ubuntu';
+  const launcher = launchCommand(kind, model.settings);
   const session = {
     id: crypto.randomUUID(), project: item.id, path: path || item.path, distro: item.distro, kind, profile,
     title: kind === 'blank' ? `${profileName(profile)} ${1 + Object.values(model.sessions).filter(term => term.project === item.id && term.kind === 'blank').length}` : launchNames[kind],
@@ -211,10 +395,11 @@ async function newTerminal(kind = 'blank', axis, item = project(), path = rootPa
   model.project = item.id;
   model.worktree = session.path === item.path ? null : session.path;
   focused = session.id;
+  focusAfterMount = session.id;
   maximized = null;
   mark(session.id, 'starting');
   const starting = save().then(() => invoke('terminal_create', {
-    spec: specFor(session, kind === 'claude' || kind === 'codex' ? model.settings[kind] : null), cols: 100, rows: 30,
+    spec: specFor(session, launcher), cols: 100, rows: 30,
   }));
   waiters.set(session.id, starting);
   starting.catch(error => mark(session.id, 'unavailable', String(error)))
@@ -241,6 +426,9 @@ async function terminate(session) {
   delete model.sessions[session.id];
   health.delete(session.id);
   runtime.delete(session.id);
+  attention.delete(session.id);
+  tmuxBells.delete(session.id);
+  seenQuiet.delete(session.id);
   render();
   save();
 }
@@ -311,16 +499,24 @@ function editItem(item, kind) {
   const title = input(kind === 'terminal' ? item.title : item.name, { maxlength: 70 });
   const color = input(safeColor(item.color), { type: 'color' });
   const role = kind === 'terminal' ? input(item.role, { maxlength: 64, placeholder: 'Principal engineer' }) : null;
+  const quiet = role ? input(item.quietWatch || 0, { type: 'number', min: 0, max: 1440 }) : null;
   const ui = dialog(kind === 'terminal' ? 'Terminal details' : 'Project details', [
     el('div', { class: 'field-pair' }, field('Name', title), field('Colour', color)),
     role ? field('Role', role) : null,
+    quiet ? field('Quiet alert after minutes of observed silence (0 turns it off)', quiet) : null,
   ]);
   ui.footer.append(button('Save', () => {
     const value = title.value.trim().slice(0, 70);
     if (!value) { ui.error('Enter a name.'); return; }
     if (role) {
+      const minutes = Number(quiet.value);
+      if (!Number.isInteger(minutes) || minutes < 0 || minutes > 1440) {
+        ui.error('Enter a quiet alert between 0 and 1440 minutes.'); return;
+      }
       item.title = value;
       item.role = role.value.trim().slice(0, 64);
+      item.quietWatch = minutes;
+      if (attention.get(item.id)?.kind === 'quiet') acknowledgeAttention(item.id);
     } else item.name = value;
     item.color = color.value;
     ui.close();
@@ -339,21 +535,28 @@ async function openSettings() {
   const fontSize = input(current.fontSize, { type: 'number', min: 9, max: 32 });
   const claude = input(current.claude);
   const codex = input(current.codex);
+  const agy = input(current.agy);
+  const fullAccess = el('input', { type: 'checkbox', checked: current.fullAccess });
+  const ping = el('input', { type: 'checkbox', checked: current.attentionPing });
   const intro = el('input', { type: 'checkbox', checked: current.intro !== false });
   const ui = dialog('Settings', [
     el('div', { class: 'field-pair' }, field('Default Ubuntu distribution', distro), field('Clone directory', cloneRoot)),
     el('div', { class: 'field-pair' }, field('Terminal font', font), field('Font size', fontSize)),
     field('Claude Code launch command', claude), field('Codex launch command', codex),
+    field('Antigravity Windows launch command', agy),
+    el('label', { class: 'check-field' }, fullAccess, 'Full access for new coding agent sessions'),
+    el('label', { class: 'check-field' }, ping, 'Play a sound for terminal attention alerts'),
     el('label', { class: 'check-field' }, intro, 'Play the Tux intro on launch'),
   ]);
   ui.footer.append(button('Save settings', () => {
     const size = Number(fontSize.value);
-    if (!font.value.trim() || !cloneRoot.value.trim() || !claude.value.trim() || !codex.value.trim() || size < 9 || size > 32) {
-      ui.error('Enter a font, valid size, clone directory and both launch commands.');
+    if (!font.value.trim() || !cloneRoot.value.trim() || !claude.value.trim() || !codex.value.trim() || !agy.value.trim() || size < 9 || size > 32) {
+      ui.error('Enter a font, valid size, clone directory and launch commands.');
       return;
     }
     model.settings = { distro: distro.value, cloneRoot: cloneRoot.value.trim(), font: font.value.trim(),
-      fontSize: size, claude: claude.value.trim(), codex: codex.value.trim(), intro: intro.checked };
+      fontSize: size, claude: claude.value.trim(), codex: codex.value.trim(), agy: agy.value.trim(),
+      fullAccess: fullAccess.checked, attentionPing: ping.checked, intro: intro.checked };
     for (const terminal of view.values()) terminal.applySettings(model.settings);
     save();
     ui.close();
@@ -387,10 +590,18 @@ function openWorktrees() {
 }
 
 async function openWorkflow(action) {
-  await workflowEditor(project(), activeSession(), action, async (id, text) => {
-    if (id !== focused || !leaves(activeTab()?.tree).includes(id)) return false;
-    return view.get(id)?.insert(text) ?? false;
-  });
+  await workflowEditor(project(), activeSession(), action, insertInFocusedTerminal);
+}
+
+function insertInFocusedTerminal(id, text) {
+  if (id !== focused || !leaves(activeTab()?.tree).includes(id)) return false;
+  return view.get(id)?.insert(text) ?? false;
+}
+
+async function openStudio() {
+  await ready;
+  openPromptStudio({ distro: project()?.distro || projectDistro(), target: activeSession(),
+    insert: insertInFocusedTerminal });
 }
 
 async function fullscreen() { await desktop.setFullscreen(!await desktop.isFullscreen()); }
@@ -400,13 +611,18 @@ function newMenu(session) {
     Object.entries(launchNames).map(([key, label]) => [label, () => newTerminal(key, session ? 'columns' : null)]));
 }
 
+function newProjectMenu() {
+  return pickCommand('New project', [['Open folder', openProject], ['Clone repository', cloneProject]]);
+}
+
 function terminalMenu(session) {
   return pickCommand(session.title, [
     ['Find in terminal', () => view.get(session.id)?.find()],
     ['Rename, colour and role', () => editItem(session, 'terminal')],
     ['Split side by side', () => newTerminal('blank', 'columns')],
     ['Split top and bottom', () => newTerminal('blank', 'rows')],
-    ['Maximize or restore pane', () => { maximized = maximized === session.id ? null : session.id; renderStage(); }],
+    ['Maximize or restore pane', () => { maximized = maximized === session.id ? null : session.id; renderStage(); save(); }],
+    ...(attention.has(session.id) ? [['Acknowledge terminal attention', () => acknowledgeAttention(session.id)]] : []),
     ['Toggle full-screen window', fullscreen],
     ['/goal objective', () => openWorkflow('goal')],
     ['/loop task', () => openWorkflow('loop')],
@@ -520,10 +736,11 @@ function palette() {
     ['Open project folder', openProject], ['Clone repository', cloneProject],
     ['New blank terminal', () => newTerminal()], ['Launch Claude Code', () => newTerminal('claude')],
     ['Launch Codex', () => newTerminal('codex')], ['New PowerShell terminal', () => newTerminal('powershell')],
+    ['Launch Antigravity on Windows', () => newTerminal('agy')], ['Toggle Sessions', () => toggleSessions()],
     ['Git worktrees', openWorktrees], ['Development status', openDevPanel], ['Merge local branch', mergeBranch], ['Environment variables', () => project() && dotenvEditor(project(), rootPath())],
     ['Workflow templates', () => openWorkflow('prompt')], ['/goal objective', () => openWorkflow('goal')],
     ['/loop task', () => openWorkflow('loop')], ['Toggle window fullscreen', fullscreen],
-    ['Spotify', openSpotify], ['Replay Tux intro', playIntro], ['Settings', openSettings],
+    ['Prompt Studio', openStudio], ['Spotify', openSpotify], ['Replay Tux intro', playIntro], ['Settings', openSettings],
     ...model.projects.map(item => [`Project: ${item.name}`, () => chooseProject(item)]),
     ...Object.values(model.sessions).map(session => [`Terminal: ${session.title}`, () => activate(session.id)]),
     ...(project() ? (gitInfo(project())?.worktrees || []).map(tree => [
@@ -555,6 +772,7 @@ function paintToolbar() {
     button('.env', busy(async () => { if (item) await dotenvEditor(item, path); }),
       { icon: 'file-key-2', disabled: !item }),
     button('Workflows', busy(() => openWorkflow('prompt')), { icon: 'arrow-down-up' }),
+    button('Prompt Studio', busy(openStudio), { icon: 'square-pen', only: true }),
     button('Spotify', openSpotify, { icon: 'music-2', only: true }),
     button('Command palette', palette, { icon: 'search', only: true, title: 'Command palette (Ctrl+Shift+P)' }),
     button('Settings', openSettings, { icon: 'settings-2', only: true }),
@@ -565,11 +783,10 @@ function paintToolbar() {
 function applySidebar() { sidebar.hidden = !model.sidebar; }
 
 function paintSidebar() {
+  if (draggedTerminal) return;
   const list = el('div', { class: 'project-list' });
   const head = el('div', { class: 'sidebar-heading' }, el('h1', { text: 'Projects' }),
-    button('Open folder', openProject, { icon: 'folder-open', only: true }),
-    button('Clone repository', cloneProject, { icon: 'git-fork', only: true }),
-    button('New terminal', () => newMenu(), { icon: 'plus', only: true }));
+    button('New project', newProjectMenu, { icon: 'plus', only: true }));
   for (const item of model.projects) {
     const selected = item.id === model.project;
     const expanded = !collapsed.has(item.id);
@@ -604,6 +821,7 @@ function paintSidebar() {
           onClick: () => activate(session.id), data: { terminalId: session.id } },
           icon('terminal'), text, activity);
         entry.style.setProperty('--session-color', safeColor(session.color));
+        draggableTerminal(entry, session.id);
         sub.append(entry);
       }
       if (selected) {
@@ -623,7 +841,10 @@ function paintSidebar() {
 }
 
 function paintTabs() {
-  tabbar.replaceChildren(...model.tabs.map(tab => {
+  const sessions = button('Sessions', () => toggleSessions(), { icon: 'activity', class: 'sessions-toggle',
+    title: 'Show terminal sessions (Ctrl+Shift+J)' });
+  sessions.setAttribute('aria-pressed', String(model.sessionsVisible));
+  const tabs = model.tabs.map(tab => {
     const ids = leaves(tab.tree);
     const first = model.sessions[ids[0]];
     const label = first ? first.title + (ids.length > 1 ? ` +${ids.length - 1}` : '') : 'Terminal';
@@ -634,12 +855,19 @@ function paintTabs() {
       data: { tabId: tab.id } });
     tabButton.draggable = true;
     tabButton.setAttribute('aria-current', tab.id === model.active ? 'page' : 'false');
-    tabButton.addEventListener('dragstart', event => event.dataTransfer.setData('application/x-agentdock-tab', tab.id));
-    tabButton.addEventListener('dragover', event => event.preventDefault());
+    tabButton.addEventListener('dragstart', event => {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData(tabDrag, tab.id);
+    });
+    tabButton.addEventListener('dragover', event => {
+      if (!event.dataTransfer.types.some(type => type === tabDrag || type === paneDrag)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+    });
     tabButton.addEventListener('drop', event => {
       event.preventDefault();
-      const source = event.dataTransfer.getData('application/x-agentdock-tab');
-      const drag = event.dataTransfer.getData('application/x-agentdock-pane');
+      const source = event.dataTransfer.getData(tabDrag);
+      const drag = event.dataTransfer.getData(paneDrag);
       if (source && source !== tab.id) {
         const from = model.tabs.findIndex(item => item.id === source);
         const to = model.tabs.findIndex(item => item.id === tab.id);
@@ -647,18 +875,20 @@ function paintTabs() {
           const [moved] = model.tabs.splice(from, 1);
           model.tabs.splice(to, 0, moved);
         }
-      } else if (drag && model.sessions[drag] && !ids.includes(drag)) {
-        removeTerminal(model, drag);
-        const destination = model.tabs.find(item => item.id === tab.id);
-        destination.tree = splitLeaf(destination.tree, ids[0], drag, 'columns');
-        model.active = destination.id;
-        focused = drag;
+      } else if (drag && !ids.includes(drag)) {
+        draggedTerminal = null;
+        clearDropTarget();
+        moveTerminal(drag, ids[0], 'right');
+        return;
       }
       render();
       save();
     });
     return tabButton;
-  }), button('New terminal', () => newMenu(), { icon: 'plus', only: true }));
+  });
+  tabbar.replaceChildren(el('div', { class: 'tab-strip' }, tabs),
+    el('div', { class: 'tab-actions' }, sessions, button('New terminal', () => newMenu(), { icon: 'plus', only: true })));
+  tabbar.querySelector('.tab.chosen')?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
 }
 
 function addDivider(handle, group, node) {
@@ -704,10 +934,10 @@ function buildLayout(tree, mounts) {
   const activity = el('span', { class: `session-status ${tone}`, text: label, data: { statusId: session.id } });
   paneLabels.set(session.id, activity);
   const caption = el('button', {
-    type: 'button', class: 'pane-caption', draggable: 'true',
+    type: 'button', class: 'pane-caption',
     title: `${profileName(session.profile)} • ${session.path}`, onClick: () => view.get(session.id)?.focus(),
   }, icon('terminal'), el('strong', { text: session.title }), session.role ? el('span', { text: session.role }) : null);
-  caption.addEventListener('dragstart', event => event.dataTransfer.setData('application/x-agentdock-pane', session.id));
+  draggableTerminal(caption, session.id);
   const content = el('div', { class: 'pane-body' }, el('div', { class: 'terminal-feedback', text: 'Loading terminal…' }));
   const frame = el('section', {
     class: `pane${focused === session.id ? ' active' : ''}`, data: { session: session.id }, 'aria-label': session.title,
@@ -718,19 +948,31 @@ function buildLayout(tree, mounts) {
     button(maximized === session.id ? 'Restore pane' : 'Maximize pane', () => {
       maximized = maximized === session.id ? null : session.id;
       renderStage();
+      save();
     }, { icon: maximized === session.id ? 'minimize' : 'maximize', only: true }),
     button('Terminal actions', () => terminalMenu(session), { icon: 'ellipsis', only: true })), content);
   frame.style.setProperty('--session-color', safeColor(session.color));
-  frame.addEventListener('dragover', event => event.preventDefault());
-  frame.addEventListener('drop', event => {
+  frame.addEventListener('dragover', event => {
+    if (!event.dataTransfer.types.includes(paneDrag) || draggedTerminal === session.id) return;
     event.preventDefault();
-    const source = event.dataTransfer.getData('application/x-agentdock-pane');
-    if (source && source !== session.id && model.sessions[source]) {
-      model.tabs = exchangeLeaves(model.tabs, source, session.id);
-      focused = source;
-      render();
-      save();
+    event.dataTransfer.dropEffect = 'move';
+    if (dropTarget !== frame) {
+      clearDropTarget();
+      dropTarget = frame;
     }
+    frame.dataset.dropPosition = paneDropPosition(event, frame);
+  });
+  frame.addEventListener('dragleave', event => {
+    if (dropTarget === frame && !frame.contains(event.relatedTarget)) clearDropTarget();
+  });
+  frame.addEventListener('drop', event => {
+    const source = event.dataTransfer.getData(paneDrag);
+    if (!source) return;
+    event.preventDefault();
+    const position = paneDropPosition(event, frame);
+    draggedTerminal = null;
+    clearDropTarget();
+    moveTerminal(source, session.id, position);
   });
   mounts.set(session.id, content);
   return frame;
@@ -771,6 +1013,7 @@ async function mountViews(mounts, revision) {
     }
     target.replaceChildren();
     terminal.mount(target, waiters.get(id));
+    applyTerminalFocus(id);
   }
 }
 
@@ -784,6 +1027,7 @@ function renderStage() {
     if (!ids.includes(focused)) focused = ids[0];
     if (!ids.includes(maximized)) maximized = null;
     stage.replaceChildren(buildLayout(maximized ? { id: maximized } : tab.tree, mounts));
+    for (const id of mounts.keys()) paintStatus(id);
   } else {
     const item = project();
     const empty = el('div', { class: 'empty-workspace' }, icon('terminal'),
@@ -801,6 +1045,7 @@ function renderStage() {
     if (!mounts.has(id) && (terminal.mounted || !model.sessions[id])) hideView(id, terminal, !model.sessions[id]);
   }
   mountViews(mounts, revision).catch(reportError);
+  paintSessions();
 }
 
 function paintStats() {
@@ -845,6 +1090,7 @@ function shortcuts(event) {
       c: event.altKey ? () => newTerminal('claude') : null,
       k: () => newTerminal('codex'), w: openWorktrees, e: () => openWorkflow('prompt'),
       b: () => { model.sidebar = !model.sidebar; applySidebar(); save(); },
+      j: () => toggleSessions(),
       '|': () => newTerminal('blank', 'columns'), '_': () => newTerminal('blank', 'rows'),
     };
     action = common[key];
@@ -871,7 +1117,7 @@ async function closeRequested(event) {
       'Close AgentDock')) return;
     await saved.catch(() => save());
     closed = true;
-    await desktop.close();
+    await desktop.destroy();
   } catch (error) {
     closed = false;
     reportError(error);
@@ -900,6 +1146,8 @@ async function tick() {
         observeMerges(),
       ]);
       if (!sample && results[0].status === 'rejected') paintStats();
+    } else if (Object.values(model.sessions).some(session => session.quietWatch || session.kind !== 'blank')) {
+      await refreshHealth().catch(() => {});
     }
   } finally {
     if (!closed) setTimeout(tick, minimized ? 6500 : 4000);
@@ -912,7 +1160,11 @@ async function init() {
     invoke('workspace_load'),
     invoke('host_distros'),
   ]);
-  if (workspaceResult.status === 'fulfilled') model = initialModel(workspaceResult.value);
+  if (workspaceResult.status === 'fulfilled') {
+    model = initialModel(workspaceResult.value);
+    focused = model.focused ?? null;
+    maximized = model.maximized ?? null;
+  }
   else reportError(workspaceResult.reason);
   if (distroResult.status === 'fulfilled') distros = distroResult.value;
   const item = project();

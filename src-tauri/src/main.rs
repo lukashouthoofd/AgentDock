@@ -5,6 +5,7 @@ mod dotenv;
 mod host;
 mod media;
 mod merge;
+mod prompt_studio;
 mod spotify_api;
 mod stats;
 mod terminal;
@@ -14,7 +15,7 @@ use host::Result;
 use serde_json::Value;
 use spotify_api::{SpotifyApi, SpotifyKind, SpotifyPage};
 use std::{path::PathBuf, sync::Arc};
-use tauri::{ipc::Response, Manager, State};
+use tauri::{ipc::{Channel, Response}, Manager, State};
 use terminal::{Health, Spec, Start, Terminals};
 use workspace::{Template, TemplateEdit, Workspace};
 
@@ -198,6 +199,40 @@ async fn terminal_health(
 #[tauri::command]
 fn terminal_active_powershell(state: State<'_, Arc<Terminals>>) -> usize {
     state.active_powershell()
+}
+
+#[tauri::command]
+async fn prompt_studio_generate(
+    state: State<'_, Arc<prompt_studio::PromptStudio>>,
+    distro: String,
+    request_id: String,
+    model: String,
+    prompt: String,
+    on_delta: Channel<String>,
+) -> Result<String> {
+    let studio = state.inner().clone();
+    blocking(move || studio.generate(&distro, &request_id, &model, &prompt, |text| {
+        on_delta.send(text).is_ok()
+    }))
+    .await
+}
+
+#[tauri::command]
+fn prompt_studio_cancel(
+    state: State<'_, Arc<prompt_studio::PromptStudio>>,
+    request_id: String,
+) -> Result<()> {
+    state.cancel(&request_id)
+}
+
+#[tauri::command]
+fn terminal_attention_ping() {
+    #[cfg(windows)]
+    // SAFETY: MessageBeep is asynchronous and takes a numeric sound identifier.
+    unsafe {
+        use windows_sys::Win32::{System::Diagnostics::Debug::MessageBeep, UI::WindowsAndMessaging::MB_OK};
+        MessageBeep(MB_OK);
+    }
 }
 
 #[tauri::command]
@@ -405,6 +440,7 @@ fn main() {
             app.manage(Arc::new(Workspace::new(root)));
             app.manage(Arc::new(Terminals::default()));
             app.manage(Arc::new(stats::Stats::default()));
+            app.manage(Arc::new(prompt_studio::PromptStudio::default()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -430,6 +466,9 @@ fn main() {
             terminal_health,
             terminal_search,
             terminal_active_powershell,
+            terminal_attention_ping,
+            prompt_studio_generate,
+            prompt_studio_cancel,
             stats_sample,
             dotenv_list,
             dotenv_read,

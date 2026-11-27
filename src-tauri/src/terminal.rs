@@ -15,6 +15,14 @@ const RING: usize = 256 * 1024;
 const CHUNK: usize = 32 * 1024;
 const MAX_SESSIONS: usize = 64;
 const SOCKET: &str = "agentdock-v1";
+const WSL_DEADLINE: Duration = Duration::from_secs(12);
+const TMUX_ALERT_OPTIONS: &[&str] = &[
+    ";", "set-option", "-g", "monitor-bell", "on",
+    ";", "set-option", "-g", "bell-action", "any",
+    ";", "set-option", "-g", "visual-bell", "off",
+    ";", "set-hook", "-g", "alert-bell[0]",
+    "set-option -wF @agentdock-bell '#{e|+|:#{?@agentdock-bell,#{@agentdock-bell},0},1}'",
+];
 type Result<T> = host::Result<T>;
 
 #[derive(Clone, Deserialize)]
@@ -42,6 +50,8 @@ pub struct Health {
     pub running: bool,
     pub exit_code: Option<i64>,
     pub last_output: u64,
+    pub bell: bool,
+    pub bell_count: u64,
 }
 
 #[derive(Serialize)]
@@ -74,7 +84,7 @@ fn target(id: &str) -> Result<String> {
 
 fn execute_tmux(distro: &str, args: &[&str], failure: &str) -> Result<()> {
     host::valid_distro(distro)?;
-    let out = host::output(tmux(distro).args(args))?;
+    let out = host::output_bounded(tmux(distro).args(args), WSL_DEADLINE)?;
     if out.status.success() {
         Ok(())
     } else {
@@ -103,7 +113,7 @@ impl Spec {
     }
 
     fn create_tmux(&self) -> Result<()> {
-        let location = host::resolve(&self.path, &self.distro, true)?;
+        let location = host::resolve(&self.path, &self.distro, false)?;
         let path = location.linux.as_deref().ok_or(
             "Ubuntu cannot enter this network folder. Select PowerShell for native UNC paths.",
         )?;
@@ -113,8 +123,6 @@ impl Spec {
             "-d",
             "-s",
             &name,
-            "-c",
-            path,
             "-x",
             "100",
             "-y",
@@ -177,8 +185,20 @@ impl Spec {
             "remain-on-exit",
             "on",
         ]);
-        execute_tmux(&self.distro, &args,
-            "Could not create the Ubuntu session. Check the distro, working directory and existing tmux installation.")
+        args.extend_from_slice(TMUX_ALERT_OPTIONS);
+        let mut command = host::wsl(&self.distro);
+        command
+            .args(["/bin/sh", "-c", "cd -- \"$1\" 2>/dev/null || exit 124; shift; exec \"$@\"", "agentdock", path])
+            .args(tmux_args())
+            .args(args)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE");
+        let output = host::output_bounded(&mut command, WSL_DEADLINE)?;
+        match output.status.code() {
+            Some(0) => Ok(()),
+            Some(124) => Err("The Ubuntu working directory is missing or unavailable.".into()),
+            _ => Err("Could not create the Ubuntu session. Check the distro and existing tmux installation.".into()),
+        }
     }
 }
 
@@ -523,13 +543,10 @@ impl Terminals {
                     .into(),
             );
         }
-        {
-            execute_tmux(
-                &spec.distro,
-                &["has-session", "-t", &target(&spec.id)?],
-                "This Ubuntu terminal is no longer available.",
-            )?;
-        }
+        let session = target(&spec.id)?;
+        let mut args = vec!["has-session", "-t", &session];
+        args.extend_from_slice(TMUX_ALERT_OPTIONS);
+        execute_tmux(&spec.distro, &args, "This Ubuntu terminal is no longer available.")?;
         let pty = Pty::spawn(spec, cols, rows)?;
         pty.attachment.store(attachment, Ordering::Release);
         self.ptys.lock().unwrap().insert(spec.id.clone(), pty);
@@ -558,8 +575,10 @@ impl Terminals {
         spec.verify()?;
         let _guard = self.lifecycle.lock().unwrap();
         if spec.profile == Profile::Ubuntu {
-            let status =
-                host::output(tmux(&spec.distro).args(["kill-session", "-t", &target(&spec.id)?]))?;
+            let status = host::output_bounded(
+                tmux(&spec.distro).args(["kill-session", "-t", &target(&spec.id)?]),
+                WSL_DEADLINE,
+            )?;
             let diagnostic = host::text(&status.stderr);
             let missing = diagnostic.starts_with("no server running")
                 || diagnostic.starts_with("can't find session:")
@@ -662,6 +681,8 @@ impl Terminals {
                         running: status.is_none(),
                         exit_code: status,
                         last_output: pty.stream.last.load(Ordering::Relaxed),
+                        bell: false,
+                        bell_count: 0,
                     },
                 )
             })
@@ -671,19 +692,19 @@ impl Terminals {
             if host::valid_distro(&distro).is_err() {
                 continue;
             }
-            let snapshot = host::output(tmux(&distro).args([
+            let snapshot = host::output_bounded(tmux(&distro).args([
                 "list-panes",
                 "-a",
                 "-F",
-                "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}",
-            ]));
+                "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{window_bell_flag}\t#{window_activity}\t#{@agentdock-bell}",
+            ]), WSL_DEADLINE);
             let Ok(snapshot) = snapshot else { continue };
             if !snapshot.status.success() {
                 continue;
             }
             for line in host::text(&snapshot.stdout).lines() {
                 let parts: Vec<_> = line.split('\t').collect();
-                if let [name, dead, status, signal] = parts.as_slice() {
+                if let [name, dead, status, signal, bell, activity, count] = parts.as_slice() {
                     let Some(id) = name.strip_prefix("ad-").filter(|id| valid_id(id)) else {
                         continue;
                     };
@@ -693,7 +714,14 @@ impl Terminals {
                         running: false,
                         exit_code: None,
                         last_output: 0,
+                        bell: false,
+                        bell_count: 0,
                     });
+                    entry.bell |= *bell == "1";
+                    entry.bell_count = entry.bell_count.max(count.parse().unwrap_or(0));
+                    if let Ok(seconds) = activity.parse::<u64>() {
+                        entry.last_output = entry.last_output.max(seconds.saturating_mul(1000));
+                    }
                     let first = seen.insert(id.to_owned());
                     entry.running = (!first && entry.running) || *dead == "0";
                     entry.exit_code = if entry.running {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { composePrompt, exchangeLeaves, formatBytes, initialModel, leaves, removeTerminal, splitLeaf } from './model.js';
+import { arrangeTerminal, composePrompt, exchangeLeaves, formatBytes, initialModel, launchCommand, leaves,
+  removeTerminal, restoreLayout, splitLeaf } from './model.js';
 
 test('splits, exchanges and removes terminals without duplicating identities', () => {
   const model = initialModel();
@@ -31,4 +32,39 @@ test('resource units consistently report MiB and GiB', () => {
   assert.equal(formatBytes(undefined), '—');
   assert.equal(formatBytes(64 * 1024 ** 2), '64 MiB');
   assert.equal(formatBytes(64 * 1024 ** 3), '64.0 GiB');
+});
+
+test('edge docking places cross-project terminals in order and preserves hidden sessions', () => {
+  const model = initialModel();
+  model.sessions = { a: { project: 'one' }, b: { project: 'two' }, c: { project: 'two' } };
+  model.tabs = [{ id: 'first', tree: { id: 'a' } }, { id: 'second', tree: { id: 'b' } }];
+  model.active = 'second';
+  assert.equal(arrangeTerminal(model, 'b', 'a', 'above'), 'first');
+  assert.equal(model.tabs.length, 1);
+  assert.equal(model.tabs[0].tree.axis, 'rows');
+  assert.deepEqual(leaves(model.tabs[0].tree), ['b', 'a']);
+  assert.equal(arrangeTerminal(model, 'c', 'a', 'right'), 'first');
+  assert.equal(model.tabs[0].tree.second.axis, 'columns');
+  assert.deepEqual(leaves(model.tabs[0].tree), ['b', 'a', 'c']);
+  arrangeTerminal(model, 'b', 'c', 'center');
+  assert.deepEqual(leaves(model.tabs[0].tree), ['c', 'a', 'b']);
+
+  const saved = { tabs: model.tabs, active: 'first', maximized: 'b', focused: 'b' };
+  delete model.sessions.b;
+  model.sessions.d = { project: 'one' };
+  assert.deepEqual(restoreLayout(model, saved), { focused: 'c', maximized: null });
+  assert.deepEqual(leaves(model.tabs[0].tree), ['c', 'a']);
+  assert.ok(model.sessions.d);
+});
+
+test('agent launchers apply the requested permissions only to new agent launches', () => {
+  const { settings } = initialModel();
+  assert.equal(launchCommand('blank', settings), null);
+  assert.match(launchCommand('codex', settings), /^codex --dangerously-bypass-approvals-and-sandbox .*notification_method/);
+  assert.match(launchCommand('claude', settings), /^claude --dangerously-skip-permissions --settings .*agent_needs_input/);
+  assert.match(launchCommand('agy', settings), /agy\.exe.* --dangerously-skip-permissions$/);
+  assert.match(launchCommand('codex', { ...settings, fullAccess: false }), /^codex -c /);
+  assert.throws(() => launchCommand('claude', { ...settings, claude: 'claude && echo done' }), /\{permissions\}/);
+  assert.equal(launchCommand('claude', { ...settings, claude: 'claude {permissions} && echo done' }),
+    'claude --dangerously-skip-permissions && echo done');
 });

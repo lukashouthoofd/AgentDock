@@ -1,6 +1,6 @@
 # AgentDock
 
-AgentDock is a Windows terminal workspace for development in Ubuntu WSL and PowerShell. It keeps project and worktree navigation, terminal layouts, prompts, dotenv editing and development status in one window. It uses the Claude Code, Codex, Git, GitHub CLI and Docker installations already available in the selected environment.
+AgentDock is a Windows terminal workspace for development in Ubuntu WSL and PowerShell. It keeps project and worktree navigation, terminal layouts, prompts, dotenv editing and development status in one window. It uses the Claude Code, Codex, Antigravity, Git, GitHub CLI and Docker installations already available in the selected environment.
 
 ## Install
 
@@ -31,19 +31,26 @@ The default installer output is under `src-tauri/target/release/bundle/nsis`. Ca
 | Launch Claude Code | Ctrl+Alt+Shift+C |
 | Launch Codex | Ctrl+Shift+K |
 | Switch terminal tab | Ctrl+Tab |
+| Sessions and layout presets | Ctrl+Shift+J |
 | Worktrees | Ctrl+Shift+W |
 | Workflows and saved prompts | Ctrl+Shift+E |
 | Find in terminal | Ctrl+Shift+F |
 | Terminal copy and paste | Ctrl+Shift+C / Ctrl+Shift+V |
 | Toggle full screen | F11 |
 
-Drag pane titles to move panes. Drag dividers or focus a divider and press an arrow key to resize. Ubuntu sessions can detach and reconnect while WSL remains running. Closing the window prompts before ending active PowerShell sessions. The Development panel fetches PR and Docker details on demand. Use the Spotify panel to control an existing Windows Spotify media session and optionally connect to the catalog and library.
+The **Projects** plus opens an existing folder or clones a repository. The plus at the right of the tab row opens a terminal. Drag a pane title or session row to a pane edge to arrange terminals from any project. Drag a divider or use arrow keys on the focused divider to resize. The Sessions panel can hide terminals, restore named layouts and surface terminal bells or configured periods of quiet.
+
+Ubuntu sessions can detach and reconnect while WSL remains running. Closing the window prompts before ending active PowerShell and Windows Antigravity sessions. New coding agent launches use full access by default for this workspace. Settings can turn this off for future launches. Prompt Studio uses the existing Claude subscription and lets you choose the model before each request.
+
+The Development panel fetches PR and Docker details on demand. Use the Spotify panel to control an existing Windows Spotify media session and optionally connect to the catalog and library.
 
 ## Documentation
 
 - [Architecture and upstream evaluation](docs/architecture.md)
 - [Engineering workflow template](docs/engineering-template.md)
 - [Development panel](docs/dev-status.md)
+- [Sessions and layout presets](docs/session-view.md)
+- [Prompt Studio](docs/prompt-studio.md)
 - [Spotify setup](docs/spotify.md)
 - [Ship It merge celebrations](docs/ship-it.md)
 - [Upstream licences and credits](THIRD_PARTY_NOTICES.txt)

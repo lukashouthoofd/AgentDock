@@ -1,8 +1,10 @@
 use serde::Serialize;
 use std::{
     env, fs,
+    io::{Read, Seek},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    time::{Duration, Instant},
 };
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -39,6 +41,37 @@ pub fn output(command: &mut Command) -> Result<Output> {
     quiet(command)
         .output()
         .map_err(|error| format!("Could not start the requested tool ({:?}).", error.kind()))
+}
+
+pub fn output_bounded(command: &mut Command, limit: Duration) -> Result<Output> {
+    const MAX_OUTPUT: u64 = 1024 * 1024;
+    let mut stdout = tempfile::tempfile().map_err(|_| "Could not allocate local command output.")?;
+    let mut stderr = tempfile::tempfile().map_err(|_| "Could not allocate local command output.")?;
+    let mut child = quiet(command)
+        .stdout(stdout.try_clone().map_err(|_| "Could not redirect local command output.")?)
+        .stderr(stderr.try_clone().map_err(|_| "Could not redirect local command errors.")?)
+        .spawn()
+        .map_err(|_| "Could not start the local terminal helper.")?;
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(15)),
+            outcome => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(if outcome.is_err() { "Could not monitor the local terminal helper." }
+                    else { "The local Ubuntu helper timed out. Retry the terminal operation." }.into());
+            }
+        }
+    };
+    let read = |file: &mut fs::File| -> Result<Vec<u8>> {
+        file.rewind().map_err(|_| "Could not read local command output.")?;
+        let mut value = Vec::new();
+        file.take(MAX_OUTPUT).read_to_end(&mut value).map_err(|_| "Could not read local command output.")?;
+        Ok(value)
+    };
+    Ok(Output { status, stdout: read(&mut stdout)?, stderr: read(&mut stderr)? })
 }
 
 pub fn text(output: &[u8]) -> String {
@@ -95,7 +128,7 @@ pub fn valid_distro(distro: &str) -> Result<()> {
 
 pub fn home(distro: &str) -> Result<String> {
     valid_distro(distro)?;
-    let out = output(wsl(distro).args(["/bin/sh", "-c", "printf '%s' \"$HOME\""]))?;
+    let out = output_bounded(wsl(distro).args(["/bin/sh", "-c", "printf '%s' \"$HOME\""]), Duration::from_secs(12))?;
     let value = text(&out.stdout);
     if out.status.success() && value.starts_with('/') {
         Ok(value)
@@ -238,7 +271,7 @@ pub fn resolve(value: &str, distro: &str, must_exist: bool) -> Result<Location> 
         regular_windows_path(path)
     };
     let linux = if valid_distro(distro).is_ok() && native.as_bytes().get(1) == Some(&b':') {
-        output(wsl(distro).args(["/usr/bin/wslpath", "-a", "-u", &native]))
+        output_bounded(wsl(distro).args(["/usr/bin/wslpath", "-a", "-u", &native]), Duration::from_secs(12))
             .ok()
             .filter(|out| out.status.success())
             .map(|out| text(&out.stdout).trim_end_matches(['\r', '\n']).to_owned())
