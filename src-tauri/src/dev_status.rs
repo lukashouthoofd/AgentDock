@@ -331,7 +331,7 @@ pub fn containers(path: &str, distro: &str) -> Result<Containers> {
                 .args(args);
             let report = run(&mut command, "Windows Docker CLI")?;
             if !report.status.success() {
-                return Err("Could not reach the Docker engine for this project environment or local Docker Desktop.".into());
+                return Err("Docker Desktop's Linux engine is unavailable. Start Docker Desktop and wait for the engine to be ready. To use Docker commands inside Ubuntu, enable WSL Integration for this distribution in Docker Desktop settings.".into());
             }
             (report, "Local Windows Docker Desktop")
         }
