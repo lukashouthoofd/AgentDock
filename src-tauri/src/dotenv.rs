@@ -296,7 +296,10 @@ impl WslFile {
     }
 
     fn write(&self, version: Option<&str>, contents: &[u8]) -> Result<(), String> {
-        use std::process::Stdio;
+        use std::{os::windows::io::AsRawHandle, process::Stdio, thread};
+        use windows_sys::Win32::{
+            Foundation::WAIT_OBJECT_0, System::Threading::WaitForSingleObject,
+        };
 
         // Windows sees only the read-only flag for an Ubuntu file. Stage and replace in the
         // distribution to preserve its actual permission bits and POSIX access ACL.
@@ -315,6 +318,8 @@ if [ "$expected" = new ]; then
 fi
 [ -f "$file" ] && [ ! -L "$file" ] || exit 18
 cat > "$tmp"
+written=$(sha256sum < "$tmp")
+[ "${written%% *}" = "$4" ] || exit 20
 [ -f "$file" ] && [ ! -L "$file" ] || exit 18
 cp --attributes-only --preserve=mode --no-target-directory -- "$file" "$tmp"
 sync -d -- "$tmp"
@@ -330,23 +335,41 @@ mv --force --no-target-directory -- "$tmp" "$file"
             .arg(&self.absolute)
             .arg(version.unwrap_or("new"))
             .arg(STAGING_PREFIX)
+            .arg(format!("{:x}", Sha256::digest(contents)))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .map_err(|_| "Could not start the local WSL dotenv save.")?;
-        let write = child
-            .stdin
-            .take()
-            .ok_or("Could not open the local WSL dotenv input.")?
-            .write_all(contents);
+        let Some(mut input) = child.stdin.take() else {
+            let _ = child.kill();
+            return Err("Could not open the local WSL dotenv input.".into());
+        };
+        let contents = contents.to_vec();
+        let write = thread::Builder::new()
+            .name("dotenv-wsl-input".into())
+            .spawn(move || input.write_all(&contents))
+            .map_err(|_| {
+                let _ = child.kill();
+                "Could not write the local WSL dotenv input."
+            })?;
+        // The child owns this handle through the bounded wait. A complete input hash is
+        // required to commit, so a closed pipe cannot turn a partial write into a valid save.
+        const WSL_SAVE_TIMEOUT_MS: u32 = 12_000;
+        if unsafe { WaitForSingleObject(child.as_raw_handle(), WSL_SAVE_TIMEOUT_MS) }
+            != WAIT_OBJECT_0
+        {
+            let _ = child.kill();
+            return Err("The local WSL dotenv operation did not respond.".into());
+        }
         let status = child
             .wait()
             .map_err(|_| "Could not finish the local WSL dotenv save.")?;
         match status.code() {
-            Some(0) if write.is_ok() => Ok(()),
+            Some(0) if write.join().is_ok_and(|result| result.is_ok()) => Ok(()),
             Some(18) => Err(CONFLICT.into()),
             Some(19) => Err("That dotenv filename already exists or cannot be created.".into()),
+            Some(20) => Err("The local WSL save did not receive the complete change.".into()),
             _ => Err("Could not save the dotenv file in its WSL project folder.".into()),
         }
     }
