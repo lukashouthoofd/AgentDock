@@ -210,6 +210,7 @@ export class TerminalView {
         }
         this.cursor = cursor;
         if (flags & 1) {
+          this.nonce = 0;
           this.transportStarted = 0;
           clearTimeout(this.connectionTimer);
           this.connected = false;
@@ -224,6 +225,7 @@ export class TerminalView {
       }
     } catch (error) {
       if (this.mounted && epoch === this.epochCounter) {
+        this.nonce = 0;
         this.transportStarted = 0;
         clearTimeout(this.connectionTimer);
         this.connected = false;
@@ -234,7 +236,8 @@ export class TerminalView {
   }
 
   send(bytes) {
-    if (!this.connected) return;
+    // xterm can answer terminal capability queries before the first frame is rendered.
+    if (!this.nonce || !this.mounted) return;
     if (this.pendingInput + bytes.length > 1024 * 1024) {
       reportError('Terminal input is busy. Wait for it to catch up before pasting more.');
       return;
@@ -243,9 +246,9 @@ export class TerminalView {
     const epoch = this.epochCounter;
     const attachment = this.nonce;
     this.writes = this.writes.then(async () => {
-      if (!this.connected || epoch !== this.epochCounter) return;
+      if (attachment !== this.nonce || epoch !== this.epochCounter) return;
       for (let index = 0; index < bytes.length; index += 4096) {
-        if (!this.connected || epoch !== this.epochCounter) return;
+        if (attachment !== this.nonce || epoch !== this.epochCounter) return;
         await invoke('terminal_write', { id: this.session.id, attachment,
           input: Array.from(bytes.subarray(index, index + 4096)) });
       }
@@ -283,6 +286,7 @@ export class TerminalView {
   conceal() {
     if (!this.mounted) return this.attachment;
     this.mounted = false;
+    this.nonce = 0;
     this.transportStarted = 0;
     clearTimeout(this.connectionTimer);
     this.connected = false;
