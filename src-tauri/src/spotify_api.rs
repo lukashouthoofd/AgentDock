@@ -23,7 +23,7 @@ type Result<T> = std::result::Result<T, String>;
 const AUTHORIZE: &str = "https://accounts.spotify.com/authorize";
 const TOKEN: &str = "https://accounts.spotify.com/api/token";
 const API: &str = "https://api.spotify.com/v1";
-const CALLBACK_PORT: u16 = 45867;
+const CALLBACK_PORT: u16 = 19284;
 const SCOPE: &str = "user-library-read playlist-read-private playlist-read-collaborative user-modify-playback-state";
 const PAGE_SIZE: u32 = 10;
 const MAX_RESPONSE: u64 = 2 * 1024 * 1024;
@@ -439,9 +439,9 @@ fn authorize(
 ) -> Result<TokenGrant> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, CALLBACK_PORT)).map_err(|error| {
         if error.kind() == ErrorKind::AddrInUse {
-            "The Spotify callback port 45867 is in use. Close the other process using it and try again."
+            "The Spotify callback port 19284 is in use. Close the other process using it and try again."
         } else {
-            "Could not open the local Spotify callback on port 45867."
+            "Could not open the local Spotify callback on port 19284."
         }
     })?;
     listener
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn callback_requires_exact_host_path_and_single_state() {
-        const HOST: &str = "127.0.0.1:45867";
+        const HOST: &str = "127.0.0.1:19284";
         let request =
             |path: &str, host: &str| format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n");
         let approved = parse_callback(

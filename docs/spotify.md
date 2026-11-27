@@ -4,9 +4,9 @@ Open Spotify from the AgentDock toolbar. The playback controls use the Spotify d
 
 ## Connect your account
 
-1. Create a personal app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard), enable Web API, and save the exact redirect URI `http://127.0.0.1:45867/callback`.
+1. Create a personal app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard), enable Web API, and save the exact redirect URI `http://127.0.0.1:19284/callback`.
 2. Add your listener account under the dashboard’s approved users if it differs from the app owner. Spotify requires a Premium subscription for the Development Mode app owner. [Spotify Development Mode rules](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide)
-3. Open **Connect Spotify for search and library** in AgentDock. Enter the public Client ID, select **Authorize in browser**, approve the request on Spotify’s site, and return to AgentDock. Port `45867` must be free while connecting. The temporary, two-minute listener binds only to `127.0.0.1` and uses Authorization Code with PKCE. [Spotify PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
+3. Open **Connect Spotify for search and library** in AgentDock. Enter the public Client ID, select **Authorize in browser**, approve the request on Spotify’s site, and return to AgentDock. Port `19284` must be free while connecting. The temporary, two-minute listener binds only to `127.0.0.1` and uses Authorization Code with PKCE. [Spotify PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
 
 Search tracks, playlists, podcasts and episodes in the panel. **My library** lists the selected category from your saved items and playlists. **Play** starts a track or playlist on your active Spotify device and requires Spotify Premium. Podcasts and episodes open in Spotify so you can choose playback there. **Search in browser** also works without connecting AgentDock. All catalog requests occur after a user action. [Spotify search](https://developer.spotify.com/documentation/web-api/reference/search) · [Spotify playback](https://developer.spotify.com/documentation/web-api/reference/start-a-users-playback)
 
