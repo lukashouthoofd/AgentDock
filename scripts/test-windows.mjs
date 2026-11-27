@@ -54,13 +54,13 @@ async function start() {
   const browserProfile = join(evidence, 'browser-profile-' + port);
   const quote = value => "'" + value.replaceAll("'", "''") + "'";
   const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    '$p=Start-Process -FilePath ' + quote(exe) + ' -WorkingDirectory ' + quote(dirname(exe)) +
-    ' -PassThru; [Console]::Write($p.Id)'], {
+    '$sw=[Diagnostics.Stopwatch]::StartNew(); $p=Start-Process -FilePath ' + quote(exe) + ' -WorkingDirectory ' + quote(dirname(exe)) +
+    ' -PassThru; do { Start-Sleep -Milliseconds 50; $p.Refresh() } until ($p.MainWindowHandle -ne [IntPtr]::Zero -or $p.HasExited -or $sw.ElapsedMilliseconds -gt 10000); if ($p.MainWindowHandle -eq [IntPtr]::Zero) { exit 1 }; [Console]::Write([string]$p.Id + "," + $sw.ElapsedMilliseconds)'], {
     timeout: 15000,
     env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--disable-gpu --disable-accelerated-video-decode --remote-debugging-port=' + port + ' --remote-debugging-address=127.0.0.1',
       WEBVIEW2_USER_DATA_FOLDER: browserProfile },
   });
-  const pid = Number(stdout.trim());
+  const [pid, nativeStartup] = stdout.trim().split(',').map(Number);
   if (!Number.isInteger(pid) || pid <= 0) throw new Error('The native AgentDock process identifier was not returned.');
   launched = { pid };
   const endpoint = 'http://127.0.0.1:' + port;
@@ -74,7 +74,7 @@ async function start() {
   page.on('pageerror', error => console.log('WEBVIEW ERROR ' + error.message));
   page.on('console', message => { if (message.type() === 'error') console.log('WEBVIEW CONSOLE ' + message.text().slice(0, 350)); });
   await page.getByRole('main', { name: 'Terminal workspace' }).waitFor();
-  return { page, startup: Math.round(performance.now() - launchTime) };
+  return { page, startup: nativeStartup, ready: Math.round(performance.now() - launchTime), browserProfile };
 }
 
 async function close(page) {
@@ -125,10 +125,10 @@ async function newShell(page, title = 'Blank terminal') {
   await until(() => page.locator('.pane.active .terminal-feedback:visible').count().then(count => count === 0), 'terminal attachment', 30000);
 }
 
-async function sample(label, count, startup) {
+async function sample(label, count, startup, browserProfile) {
   if (!measure) return;
   const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    `& '${measure.replaceAll("'", "''")}' -RootProcessId ${launched.pid} -RootExecutable '${exe.replaceAll("'", "''")}' -Label AgentDock -TerminalCount ${count} -StartupMilliseconds ${startup} -Samples 5 -IntervalSeconds 2 -QuietSeconds 3 | ConvertTo-Json -Depth 6`],
+    `& '${measure.replaceAll("'", "''")}' -RootProcessId ${launched.pid} -RootExecutable '${exe.replaceAll("'", "''")}' -Label AgentDock -TerminalCount ${count} -StartupMilliseconds ${startup} -WebViewUserDataDirectory '${browserProfile.replaceAll("'", "''")}' -Samples 7 -IntervalSeconds 2 -QuietSeconds 4 -Proportional | ConvertTo-Json -Depth 6`],
   { timeout: 45000, maxBuffer: 1024 * 1024 });
   await writeFile(join(evidence, 'agentdock-' + label + '.json'), stdout);
 }
@@ -143,7 +143,7 @@ async function captureWorkspace() {
 }
 
 try {
-  let { page, startup } = await start();
+  let { page, startup, ready, browserProfile } = await start();
   const clip = page.locator('.intro-video');
   if (!await clip.count()) {
     await page.keyboard.press('Control+Shift+P');
@@ -152,8 +152,8 @@ try {
   await until(() => clip.evaluate(video => video.currentTime > 0 && video.videoWidth === 640), 'Tux video decoding', 2800);
   await page.getByRole('button', { name: 'Skip intro' }).click();
   result('Native WebView2 Tux clip decoded, playback and skip');
-  await sample('idle', 0, startup);
-  result('Native workspace booted in ' + startup + ' ms with CDP attached');
+  await sample('idle', 0, startup, browserProfile);
+  result('Native window in ' + startup + ' ms and workspace observed through CDP in ' + ready + ' ms');
   await openProject(page, ubuntu);
   await newShell(page);
   await command(page, "export ADKEEP=keep; printf '\\033[31mAD%s λ雪\\033[0m\\n' 'ANSI'; pwd");
@@ -255,9 +255,10 @@ try {
   result('Local Git CLI clone created and opened a new Ubuntu project');
   await page.locator('[data-terminal-id="' + linuxId + '"]').click();
 
+  const outputStarted = performance.now();
   await cmdAfterMount(page, "seq 1 12000; printf 'AD%s\\n' HIGHOUTPUT");
   await textInTerminal(page, 'ADHIGHOUTPUT', 30000);
-  result('Responsive ConPTY/tmux rendering through 12,000 output lines');
+  result('ConPTY/tmux rendered the marker after 12,000 lines in ' + Math.round(performance.now() - outputStarted) + ' ms');
 
   await toolbar(page, 'Workflows').click();
   const workflows = page.getByRole('dialog', { name: 'Workflow prompts' });
@@ -268,13 +269,16 @@ try {
 
   const total = () => page.locator('[data-terminal-id]').count();
   while (await total() < 10) await newShell(page);
-  await sample('ten', 10, startup);
+  await sample('ten', 10, startup, browserProfile);
   while (await total() < 20) await newShell(page);
   await until(() => page.getByRole('contentinfo', { name: 'System resources' }).getByText('20', { exact: true }).isVisible(), 'twenty active sessions', 28000);
   await page.screenshot({ path: join(evidence, 'twenty-sessions.png') });
   await captureWorkspace();
   result('Twenty live controlled terminals, single workspace and bounded renderer attachment');
 
+  await openProject(page, windows);
+  await newShell(page, 'PowerShell');
+  const closingPowerShell = await page.locator('.pane.active').getAttribute('data-session');
   await page.locator('[data-terminal-id="' + linuxId + '"]').click();
   await tty(page).waitFor();
   await close(page);
@@ -285,6 +289,9 @@ try {
   await cmdAfterMount(page, 'printf "AD%s\\n" "$ADKEEP"');
   await textInTerminal(page, 'ADkeep');
   result('Native close/reopen restored the persisted Ubuntu shell');
+  await page.locator('[data-terminal-id="' + closingPowerShell + '"]').click();
+  await page.getByText('This PowerShell terminal has ended.', { exact: false }).waitFor();
+  result('Closing with an active PowerShell prompted and reopening did not start a new PowerShell');
   await close(page);
 } catch (error) {
   console.error(error);
