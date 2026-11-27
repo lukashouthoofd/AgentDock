@@ -121,7 +121,7 @@ async function openProject(page, folder) {
 async function newShell(page, title = 'Blank terminal') {
   await toolbar(page, 'New terminal').click();
   await page.getByRole('dialog', { name: 'New terminal' }).getByRole('button', { name: title, exact: true }).click();
-  await tty(page).waitFor();
+  await tty(page).waitFor({ state: 'attached', timeout: 20000 });
   await until(() => page.locator('.pane.active .terminal-feedback:visible').count().then(count => count === 0), 'terminal attachment', 30000);
 }
 
@@ -281,7 +281,7 @@ try {
   await newShell(page, 'PowerShell');
   const closingPowerShell = await page.locator('.pane.active').getAttribute('data-session');
   await page.locator('[data-terminal-id="' + linuxId + '"]').click();
-  await tty(page).waitFor();
+  await tty(page).waitFor({ state: 'attached', timeout: 20000 });
   await close(page);
   ({ page } = await start());
   const skip = page.getByRole('button', { name: 'Skip intro' });
@@ -296,7 +296,16 @@ try {
   await close(page);
 } catch (error) {
   console.error(error);
-  await browser?.contexts()[0]?.pages()[0]?.screenshot({ path: join(evidence, 'failure.png') }).catch(() => {});
+  const faultPage = browser?.contexts()[0]?.pages()[0];
+  if (faultPage) {
+    const diagnostics = await faultPage.evaluate(async () => ({
+      visibility: document.visibilityState,
+      pane: document.querySelector('.pane.active .terminal-feedback:not([hidden])')?.textContent,
+      minimized: await window.__TAURI_INTERNALS__.invoke('plugin:window|is_minimized', { label: 'main' }).catch(() => null),
+    })).catch(() => null);
+    console.error('Window diagnostic', JSON.stringify(diagnostics));
+  }
+  await faultPage?.screenshot({ path: join(evidence, 'failure.png') }).catch(() => {});
   process.exitCode = 1;
 } finally {
   await captureWorkspace();
@@ -310,7 +319,7 @@ try {
 }
 
 async function cmdAfterMount(page, value) {
-  await tty(page).waitFor();
+  await tty(page).waitFor({ state: 'attached', timeout: 20000 });
   await until(() => page.locator('.pane.active .terminal-feedback:visible').count().then(count => count === 0), 'terminal reattachment');
   await command(page, value);
 }

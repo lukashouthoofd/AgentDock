@@ -878,7 +878,7 @@ async function closeRequested(event) {
 
 async function tick() {
   try {
-    const nowMinimized = document.hidden || await desktop.isMinimized();
+    const nowMinimized = await desktop.isMinimized();
     if (nowMinimized !== minimized) {
       minimized = nowMinimized;
       renderStage();
@@ -921,6 +921,12 @@ async function init() {
   document.addEventListener('keydown', shortcuts, { capture: true });
   desktop.onCloseRequested(closeRequested).catch(reportError);
   window.addEventListener('focus', () => {
+    if (minimized) desktop.isMinimized().then(isMinimized => {
+      if (!isMinimized && minimized) {
+        minimized = false;
+        renderStage();
+      }
+    }).catch(() => {});
     const item = project();
     if (item) refreshGit(item, rootPath());
   });
