@@ -31,3 +31,5 @@ The verified native release was bundled into a 2.93 MiB current-user Windows ins
 ## tmux and WSL storage update
 
 The 0.2.0 work consolidates new terminal profiles on tmux, discovers external sessions, and adds configurable workspace keyboard controls. See [the tmux design and verification](tmux-workspace.md) and [the WSL audit](wsl-storage.md). The focused desktop gate verified exact session control, stale-target rejection, scrollback, customizable keys, and Ubuntu and PowerShell process continuity across app closure. Separate installed CLI fixtures verified exact conversation resume for Claude Code and Codex. Existing repositories and host settings were preserved during the storage audit.
+
+The Windows release passed the initial desktop, focused tmux, installed CLI and installer checks. The process-tree benchmarks and remaining platform limitations are in the verification and benchmark records.
