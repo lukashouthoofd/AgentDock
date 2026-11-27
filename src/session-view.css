@@ -1,0 +1,147 @@
+.session-rail {
+  --session-rail-width: clamp(210px, 22vw, 286px);
+  width: var(--session-rail-width);
+  flex: 0 0 var(--session-rail-width);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-paper);
+  border-left: 1px solid var(--color-rule);
+}
+
+.session-rail-heading {
+  display: flex;
+  gap: 8px;
+  min-height: 40px;
+  align-items: center;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.session-rail-heading h2 { font-size: 13px; }
+
+.session-rail-heading button {
+  margin-left: auto;
+  width: var(--control);
+  border-color: transparent;
+  padding: 0;
+  background: transparent;
+}
+.session-rail-heading button:hover { background: var(--color-raised); }
+
+.session-rail-count {
+  color: var(--color-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-rail-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.session-rail-project {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px;
+  align-items: baseline;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.session-rail-project strong { color: var(--color-ink-soft); }
+.session-rail-content { flex: 1; min-height: 0; overflow: auto; }
+.session-rail-list { display: grid; margin: 0; padding: 0; list-style: none; }
+
+.session-rail-row {
+  min-width: 0;
+  display: grid;
+  row-gap: 5px;
+  padding: 9px 10px 9px 11px;
+  border-left: 2px solid var(--color-rule);
+  border-bottom: 1px solid var(--color-rule);
+}
+.session-rail-row[aria-current="true"] {
+  border-left-color: var(--rail-session-color);
+  background: var(--color-panel);
+}
+
+.session-rail-row-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+.session-rail-row-heading > .icon { color: var(--rail-session-color); }
+.session-rail-ellipsis { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.session-rail-meta {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding-left: 22px;
+  color: var(--color-muted);
+  font-size: 11px;
+}
+.session-rail-path { font-family: var(--font-readings); }
+.session-rail-actions { display: flex; gap: 6px; padding-left: 22px; }
+.session-rail-actions button { font-size: 11px; gap: 4px; }
+.session-rail-actions .icon { width: 12px; height: 12px; flex-basis: 12px; }
+.session-rail-empty { padding: 12px; font-size: 12px; color: var(--color-muted); }
+
+.session-rail-heading .session-rail-layout-trigger {
+  width: auto;
+  margin-left: auto;
+  padding: 0 7px;
+  font-size: 12px;
+}
+.session-rail-layout-trigger + button { margin-left: 0; }
+
+.session-rail-flags,
+.session-rail-attention {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  padding-left: 22px;
+  font-size: 11px;
+  color: var(--color-muted);
+}
+.session-rail-visible { color: var(--color-cool); }
+.session-rail-flags button { padding-inline: 5px; margin-left: auto; }
+.session-rail-flags button + button { margin-left: 0; }
+.session-rail-flags button[aria-label] { min-width: var(--control); }
+.session-rail-attention { color: var(--color-accent); justify-content: space-between; }
+.session-rail-attention span { min-width: 0; overflow-wrap: anywhere; }
+.session-rail-attention button { font-size: 11px; padding-inline: 5px; }
+.session-rail-row[data-attention="true"] { border-left-color: var(--color-accent); }
+.session-rail-actions button { padding-inline: 6px; }
+
+.session-layout-list {
+  display: grid;
+  gap: 5px;
+  padding: 0;
+  margin: 0 0 10px;
+  list-style: none;
+}
+.session-layout-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: var(--control);
+}
+.session-layout-list strong { margin-right: auto; }
+
+@media (max-width: 1399px) {
+  .workbench:has(> .session-rail) { position: relative; }
+  .session-rail {
+    position: absolute;
+    z-index: 15;
+    inset: 0 0 0 auto;
+    width: min(294px, 100%);
+    box-shadow: -12px 0 24px var(--color-backdrop);
+  }
+}
