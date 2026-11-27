@@ -29,6 +29,8 @@ pub struct Snapshot {
 pub struct Session {
     pub identity: SessionIdentity,
     pub name: String,
+    #[serde(default)]
+    pub managed: bool,
     pub attached: u32,
     pub activity: Option<u64>,
     pub panes: Vec<Pane>,
@@ -128,57 +130,88 @@ pub fn discover(distro: &str) -> Result<Snapshot> {
     Ok(snapshot)
 }
 
-/// Verifies that the same server and session are still live. Use guarded_args for actions.
-pub fn verify(identity: &SessionIdentity) -> Result<()> {
-    identity.validate()?;
-    let output = host::output_bounded(
-        host::wsl(&identity.distro).args(identity.helper_identity("verify")),
-        Duration::from_secs(12),
-    )?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(
-            "This Ubuntu tmux session changed or is no longer available. Refresh the session list."
-                .into(),
-        )
-    }
-}
-
 /// Returns arguments following WSL --exec. The helper checks the target again immediately before
 /// exec, preserves the caller's terminal, and passes only the supported exact-target operations.
 pub fn guarded_args(identity: &SessionIdentity, command_args: &[&str]) -> Result<Vec<String>> {
     identity.validate()?;
     let session = identity.session_id.as_str();
-    let (pane, action): (&str, Vec<&str>) = match command_args {
+    let pane_cwd = "#{pane_current_path}";
+    let (pane, window, action): (&str, &str, Vec<&str>) = match command_args {
         [action @ ("attach-session" | "kill-session" | "copy-mode")] => {
-            ("", vec![action, "-t", session])
+            ("", "", vec![action, "-t", session])
         }
         ["rename-session", name] if valid_rename(name) => {
-            ("", vec!["rename-session", "-t", session, name])
+            ("", "", vec!["rename-session", "-t", session, name])
         }
-        ["split-window", direction @ ("-h" | "-v")] => {
-            ("", vec!["split-window", direction, "-t", session])
-        }
-        ["split-window", direction @ ("-h" | "-v"), pane] if tmux_id(pane, '%') => {
-            (pane, vec!["split-window", direction, "-t", pane])
-        }
+        ["split-window", direction @ ("-h" | "-v")] => (
+            "",
+            "",
+            vec!["split-window", direction, "-t", session, "-c", pane_cwd],
+        ),
+        ["split-window", direction @ ("-h" | "-v"), pane] if tmux_id(pane, '%') => (
+            pane,
+            "",
+            vec!["split-window", direction, "-t", pane, "-c", pane_cwd],
+        ),
         ["select-pane", direction @ ("-L" | "-R" | "-U" | "-D")] => {
-            ("", vec!["select-pane", direction, "-t", session])
+            ("", "", vec!["select-pane", direction, "-t", session])
         }
-        [action @ ("select-pane" | "kill-pane"), pane] if tmux_id(pane, '%') => {
-            (pane, vec![action, "-t", pane])
+        ["select-pane", window, pane] if tmux_id(window, '@') && tmux_id(pane, '%') => (
+            pane,
+            window,
+            vec![
+                "select-pane",
+                "-t",
+                pane,
+                ";",
+                "select-window",
+                "-t",
+                window,
+            ],
+        ),
+        [action @ ("select-pane" | "kill-pane" | "copy-mode"), pane] if tmux_id(pane, '%') => {
+            (pane, "", vec![action, "-t", pane])
         }
         ["send-keys", "-X", direction @ ("search-forward" | "search-backward"), query]
+        | ["search", direction @ ("search-forward" | "search-backward"), query]
             if valid_search(query) =>
         {
-            ("", vec!["send-keys", "-X", "-t", session, direction, query])
+            let literal_mode = if *direction == "search-backward" {
+                "search-backward-text"
+            } else {
+                "search-forward-text"
+            };
+            (
+                "",
+                "",
+                vec![
+                    "copy-mode",
+                    "-t",
+                    session,
+                    ";",
+                    "send-keys",
+                    "-X",
+                    "-t",
+                    session,
+                    "--",
+                    literal_mode,
+                    query,
+                ],
+            )
         }
         _ => return Err("This tmux operation or target is unsupported.".into()),
     };
     let mut args = identity.helper_identity("action");
     args.push(pane.to_owned());
-    args.extend(action.into_iter().map(str::to_owned));
+    args.push(window.to_owned());
+    let mut action: Vec<_> = action.into_iter().map(str::to_owned).collect();
+    if matches!(command_args.first(), Some(&("send-keys" | "search"))) {
+        if let Some(query) = action.last_mut().filter(|value| value.ends_with(';')) {
+            // tmux's argv parser treats a trailing semicolon as a command separator.
+            query.insert(query.len() - 1, '\\');
+        }
+    }
+    args.extend(action);
     Ok(args)
 }
 
@@ -193,10 +226,7 @@ fn valid_rename(value: &str) -> bool {
 }
 
 fn valid_search(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 1000
-        && !value.chars().any(char::is_control)
-        && !value.contains([';', '\\', '#'])
+    !value.is_empty() && value.len() <= 1000 && !value.chars().any(char::is_control)
 }
 
 // The helper reads kernel socket ownership and tmux format metadata. It never capture-panes
@@ -230,12 +260,42 @@ def number(value):
 def identifier(value, prefix):
     return re.fullmatch(re.escape(prefix) + r"(0|[1-9][0-9]{0,9})", value) is not None
 
+def managed_socket():
+    directory = os.environ.get("TMUX_TMPDIR")
+    try:
+        base = os.path.realpath(directory, strict=True) if directory else "/tmp"
+    except OSError:
+        base = "/tmp"
+    directory = os.path.join(base, "tmux-" + str(UID))
+    try:
+        info = os.lstat(directory)
+        if info.st_uid == UID and stat.S_ISDIR(info.st_mode) and not info.st_mode & 0o007:
+            return os.path.join(directory, "agentdock-v1")
+    except OSError:
+        pass
+    return None
+
+def own_socket_info(info):
+    return info.st_uid == UID and stat.S_ISSOCK(info.st_mode)
+
 def owned_socket(path):
     try:
-        info = os.lstat(path)
-        return info.st_uid == UID and stat.S_ISSOCK(info.st_mode)
+        return own_socket_info(os.lstat(path))
     except OSError:
         return False
+
+def pin_socket(path):
+    try:
+        descriptor = os.open(path, os.O_PATH | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        if own_socket_info(os.fstat(descriptor)):
+            return descriptor
+    except OSError:
+        pass
+    os.close(descriptor)
+    return None
 
 def listeners():
     sockets = {}
@@ -278,26 +338,30 @@ def server_sockets(pid, known):
             for entry in entries:
                 try:
                     link = os.readlink(entry.path)
-                except OSError:
+                except FileNotFoundError:
                     continue
                 if link.startswith("socket:[") and link.endswith("]"):
                     path = known.get(link[8:-1])
-                    if path and path not in seen:
+                    if path:
                         seen.add(path)
-                        yield path
     except OSError:
-        return
+        return seen, False
+    return seen, True
 
 def tmux(path):
     return [TMUX, "-N", "-f", "/dev/null", "-S", path]
 
-def query(path, deadline):
-    if not owned_socket(path) or time.monotonic() >= deadline:
+def pinned_path(descriptor):
+    return "/proc/self/fd/" + str(descriptor)
+
+def query(descriptor, deadline):
+    if time.monotonic() >= deadline:
         return None
     try:
         with subprocess.Popen(
-            tmux(path) + ["list-panes", "-a", "-F", FORMAT],
+            tmux(pinned_path(descriptor)) + ["list-panes", "-a", "-F", FORMAT],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            pass_fds=(descriptor,),
         ) as child:
             try:
                 data = bytearray()
@@ -321,15 +385,23 @@ def query(path, deadline):
         return None
 
 def records(lines, pid):
+    rows = []
+    complete = True
     for line in lines:
+        if not line:
+            continue
         fields = line.split(SEPARATOR)
         if len(fields) == len(FIELDS) and number(fields[0]) == UID and number(fields[1]) == pid:
-            yield fields
+            rows.append(fields)
+        else:
+            complete = False
+    return rows, complete
 
 def discover(distro, boot):
     result = {"distro": distro, "sessions": [], "complete": True}
     deadline = time.monotonic() + 5
     known = listeners()
+    managed = managed_socket()
     by_id = {}
     panes = 0
     servers = 0
@@ -344,16 +416,28 @@ def discover(distro, boot):
             epoch = server_start(pid)
             if not epoch:
                 continue
-            for path in server_sockets(pid, known):
+            sockets, readable = server_sockets(pid, known)
+            if not readable:
+                result["complete"] = False
+            for path in sorted(sockets):
                 if servers == MAX_SERVERS or panes == MAX_PANES or time.monotonic() >= deadline:
                     result["complete"] = False
                     break
                 servers += 1
-                lines = query(path, min(deadline, time.monotonic() + .8))
+                descriptor = pin_socket(path)
+                if descriptor is None:
+                    result["complete"] = False
+                    continue
+                try:
+                    lines = query(descriptor, min(deadline, time.monotonic() + .8))
+                finally:
+                    os.close(descriptor)
                 if lines is None or server_start(pid) != epoch:
                     result["complete"] = False
                     continue
-                for row in records(lines, pid):
+                rows, valid = records(lines, pid)
+                result["complete"] = result["complete"] and valid
+                for row in rows:
                     (uid, server, session, created, attached, activity, name, window,
                      window_active, pane, active, dead, pane_pid, cwd, command, code, signal,
                      dead_at, bell, bell_count, window_activity) = row
@@ -375,7 +459,8 @@ def discover(distro, boot):
                                 "distro": distro, "socket": path, "bootId": boot, "serverPid": pid,
                                 "serverStarted": epoch, "sessionId": session, "sessionCreated": created,
                             },
-                            "name": name, "attached": attached, "activity": number(activity),
+                            "name": name, "managed": path == managed,
+                            "attached": attached, "activity": number(activity),
                             "panes": [],
                         }
                     command = text(command, 96)
@@ -399,17 +484,36 @@ def discover(distro, boot):
     ))
     return result
 
-def checked(path, boot, pid, started, session, created, pane):
-    if BOOT_ID != boot or server_start(pid) != started or path not in server_sockets(pid, listeners()):
-        return False
-    lines = query(path, time.monotonic() + 1.5)
+def checked(descriptor, path, boot, pid, started, session, created, pane, window, needs_pane):
+    if BOOT_ID != boot or server_start(pid) != started or path not in server_sockets(pid, listeners())[0]:
+        return None
+    lines = query(descriptor, time.monotonic() + 1.5)
     if lines is None:
-        return False
-    matches = any(
-        row[2] == session and number(row[3]) == created and (not pane or row[9] == pane)
-        for row in records(lines, pid)
-    )
-    return matches and server_start(pid) == started and path in server_sockets(pid, listeners())
+        return None
+    rows, _ = records(lines, pid)
+    matching = [
+        row for row in rows
+        if row[2] == session and number(row[3]) == created and (not window or row[7] == window)
+        and (not needs_pane or (
+            identifier(row[7], "@") and identifier(row[9], "%")
+            and (row[9] == pane if pane else row[8] == "1" and row[10] == "1")
+        ))
+    ]
+    if not matching or server_start(pid) != started or path not in server_sockets(pid, listeners())[0]:
+        return None
+    return matching[0]
+
+def scope_pane_action(action, session, window, pane):
+    window_target = session + ":" + window
+    pane_target = window_target + "." + pane
+    if action[:1] == ["select-pane"] and action[3:5] == [";", "select-window"]:
+        action[2] = pane_target
+        action[6] = window_target
+    else:
+        for index, word in enumerate(action[:-1]):
+            if word == "-t":
+                action[index + 1] = pane_target
+    return action
 
 with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
     BOOT_ID = stream.read().strip()
@@ -428,16 +532,28 @@ if mode == "discover":
         else:
             panes = sessions[0]["panes"]
             del panes[len(panes) // 2:]
-else:
+elif mode == "action":
     path, boot, pid, started, session, created = sys.argv[2:8]
-    pane = sys.argv[8] if mode == "action" else ""
-    if not checked(path, boot, int(pid), int(started), session, int(created), pane):
-        print("The tmux session or pane changed. Refresh its details before retrying.", file=sys.stderr)
-        sys.exit(1)
-    if mode == "action":
-        os.execv(TMUX, tmux(path) + sys.argv[9:])
-    elif mode != "verify":
-        sys.exit(1)
+    pane, window, action = sys.argv[8], sys.argv[9], sys.argv[10:]
+    needs_pane = bool(action) and action[0] not in {"attach-session", "rename-session", "kill-session"}
+    descriptor = pin_socket(path)
+    if descriptor is not None:
+        try:
+            row = checked(descriptor, path, boot, int(pid), int(started), session, int(created),
+                          pane, window, needs_pane)
+            if row:
+                if needs_pane:
+                    action = scope_pane_action(action, session, row[7], row[9])
+                # An inherited O_PATH descriptor pins this socket's filesystem inode through
+                # exec and connect. A replacement at the old pathname cannot get this action.
+                os.set_inheritable(descriptor, True)
+                os.execv(TMUX, tmux(pinned_path(descriptor)) + action)
+        finally:
+            os.close(descriptor)
+    print("The tmux session or pane changed. Refresh its details before retrying.", file=sys.stderr)
+    sys.exit(1)
+else:
+    sys.exit(1)
 "##;
 
 #[cfg(test)]
@@ -470,10 +586,39 @@ mod tests {
         let args = guarded_args(&identity, &["split-window", "-h", "%26"]).unwrap();
         assert!(args.ends_with(&[
             "%26".to_string(),
+            "".into(),
             "split-window".into(),
             "-h".into(),
             "-t".into(),
             "%26".into(),
+            "-c".into(),
+            "#{pane_current_path}".into(),
+        ]));
+        let args = guarded_args(&identity, &["select-pane", "@4", "%26"]).unwrap();
+        assert!(args.ends_with(&[
+            "%26".to_string(),
+            "@4".into(),
+            "select-pane".into(),
+            "-t".into(),
+            "%26".into(),
+            ";".into(),
+            "select-window".into(),
+            "-t".into(),
+            "@4".into(),
+        ]));
+        let args = guarded_args(&identity, &["search", "search-backward", r"#[abc]\;"]).unwrap();
+        assert!(args.ends_with(&[
+            "copy-mode".to_string(),
+            "-t".into(),
+            "$9".into(),
+            ";".into(),
+            "send-keys".into(),
+            "-X".into(),
+            "-t".into(),
+            "$9".into(),
+            "--".into(),
+            "search-backward-text".into(),
+            r"#[abc]\\;".into(),
         ]));
     }
 
@@ -483,9 +628,10 @@ mod tests {
         for args in [
             vec!["rename-session", "safe;kill-server"],
             vec!["select-pane", "%1;"],
+            vec!["select-pane", "@1", "1"],
             vec!["kill-pane", "first"],
             vec!["attach-session", "-d"],
-            vec!["send-keys", "-X", "search-backward", "thing;"],
+            vec!["send-keys", "-X", "search-backward", "thing\n"],
         ] {
             assert!(guarded_args(&identity, &args).is_err());
         }
