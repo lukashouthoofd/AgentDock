@@ -377,3 +377,5 @@ button.chosen:hover { background: var(--color-selection); }
 .development-row { display: flex; justify-content: space-between; gap: 8px; align-items: center; background: var(--color-panel); padding: 4px 8px; }
 .development-main { display: grid; min-width: 0; overflow-wrap: anywhere; }
 .development-main .muted { font-size: 12px; }
+.recent-folders { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.recent-folders h3 { flex-basis: 100%; font-size: 13px; }

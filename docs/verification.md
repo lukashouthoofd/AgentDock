@@ -4,11 +4,11 @@ The delivery gates are tracked in [the mission checkpoint](mission.md). Developm
 
 ## Observed evidence
 
-- The first native Windows release binary compiled and opened an AgentDock desktop window using the installed WebView2 runtime.
+- The first native Windows release binary compiled and opened an AgentDock desktop window using the installed WebView2 runtime. A Windows UI pilot with the updated frontend opened a disposable Ubuntu project and ran a terminal command that returned Linux and Ubuntu-24.04.
 - The bundled intro generator produced a 63,248-byte, 640 × 360, 2.792-second silent VP8 clip. Its storyboard and last decoded frames were reviewed. Runtime playback is checked separately in the desktop test.
 - Dotenv unit fixtures passed on Linux, Windows NTFS, and Ubuntu accessed by Windows UNC. A dedicated native write preserved multiline bytes, mode 0600 and extended POSIX ACL on a WSL file.
 - The Ship It branch and reflog tests covered successful fast-forward and merge commits, linked worktrees, conflicts, ordinary commits and no-op merges. The animation was tested in Chromium for the exact message, dismissal and reduced motion.
-- The Spotify native probe read the existing Spotify desktop media session without changing playback. Windows tests covered the loopback callback, request validation, catalog normalization, and DPAPI token storage. The live catalog and library check is separate.
+- The Spotify native probe read the existing Spotify desktop media session without changing playback. Windows tests covered the loopback callback, request validation, catalog normalization, and DPAPI token storage. Live Spotify searches and library first pages passed for tracks, playlists, shows and episodes. A second Windows process restored the authorized connection through DPAPI. The native verification made no playback changes.
 - [Measured VS Code and Windows Terminal baselines](benchmark-method.md) include verified Linux Bash processes from the installed Ubuntu distribution. AgentDock measures are separate.
 - Independent review found a Windows release media policy issue, PTY ownership and stale I/O issues, clipboard and link routing gaps, a dotenv save race, and a pane drop defect. Fixes were integrated into the workspace before the Windows desktop run. The Aikido local scanner required a keychain or token unavailable on this workstation.
 

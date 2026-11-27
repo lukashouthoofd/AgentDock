@@ -30,6 +30,7 @@ export class TerminalView {
       if (event.ctrlKey) invoke('open_terminal_link', { value }).catch(reportError);
     };
     this.term = new Terminal({
+      allowProposedApi: true,
       linkHandler: { activate: openLink },
       fontFamily: settings.font,
       fontSize: settings.fontSize,
@@ -189,6 +190,11 @@ export class TerminalView {
 
   send(bytes) {
     if (!this.connected) return;
+    if (this.pendingInput + bytes.length > 1024 * 1024) {
+      reportError('Terminal input is busy. Wait for it to catch up before pasting more.');
+      return;
+    }
+    this.pendingInput += bytes.length;
     const epoch = this.epochCounter;
     const attachment = this.nonce;
     this.writes = this.writes.then(async () => {
@@ -200,7 +206,7 @@ export class TerminalView {
       }
     }).catch(error => {
       if (this.connected && epoch === this.epochCounter) reportError(error);
-    });
+    }).finally(() => { this.pendingInput -= bytes.length; });
   }
 
   find() {
@@ -246,6 +252,7 @@ export class TerminalView {
     this.root.remove();
   }
 
+  pendingInput = 0;
   mounted = false;
   connected = false;
   epochCounter = 0;

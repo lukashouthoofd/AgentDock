@@ -41,7 +41,7 @@ for name, version, license, source, path in sorted(items, key=lambda item: (item
     for item in sorted(path.iterdir()):
         if not item.is_file() or not item.name.lower().startswith(("licen", "copying", "notice", "copyright")):
             continue
-        text = item.read_text(encoding="utf-8", errors="replace").strip()
+        text = "\n".join(line.rstrip() for line in item.read_text(encoding="utf-8", errors="replace").splitlines()).strip()
         digest = hashlib.sha256(text.encode()).hexdigest()
         if digest not in texts:
             texts[digest] = (f"L{len(texts) + 1:03}", text)

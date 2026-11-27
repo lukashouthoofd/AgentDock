@@ -1,8 +1,8 @@
 /* Native UI verification. Use an empty AgentDock profile and disposable repositories. */
 import assert from 'node:assert/strict';
-import { execFile as exec, spawn } from 'node:child_process';
+import { execFile as exec } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { chromium } from 'playwright-core';
@@ -14,13 +14,15 @@ if (process.platform !== 'win32' || ![exeArg, ubuntu, windows, distro, output].e
 }
 const exe = resolve(exeArg);
 const report = [];
-const profile = join(process.env.LOCALAPPDATA, 'local.agentdock.workspace', 'workspace.json');
+const identifier = process.env.AGENTDOCK_VERIFY_IDENTIFIER || 'local.agentdock.workspace';
+if (!/^[A-Za-z0-9.-]+$/.test(identifier)) throw new Error('Invalid fixture application identifier.');
+const profile = join(process.env.LOCALAPPDATA, identifier, 'workspace.json');
 const evidence = resolve(output);
 await mkdir(evidence, { recursive: true });
 const sessionIds = new Set();
 let launched;
 let browser;
-let port = 19284;
+let port = 19281;
 const measure = process.env.AGENTDOCK_MEASURE_SCRIPT;
 
 function result(message) {
@@ -47,17 +49,26 @@ async function start() {
   if (present?.projects?.some(item => ![ubuntu, windows, ubuntu + '-clone'].includes(item.path))) {
     throw new Error('Use a disposable AgentDock profile. Existing workspace data was found.');
   }
-  port++;
+  port += 2;
   const launchTime = performance.now();
-  const child = spawn(exe, [], {
-    env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=' + port + ' --remote-debugging-address=127.0.0.1',
-      WEBVIEW2_USER_DATA_FOLDER: join(evidence, 'browser-profile-' + port) },
-    stdio: 'ignore',
+  const browserProfile = join(evidence, 'browser-profile-' + port);
+  const quote = value => "'" + value.replaceAll("'", "''") + "'";
+  const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    '$p=Start-Process -FilePath ' + quote(exe) + ' -WorkingDirectory ' + quote(dirname(exe)) +
+    ' -PassThru; [Console]::Write($p.Id)'], {
+    timeout: 15000,
+    env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--disable-gpu --disable-accelerated-video-decode --remote-debugging-port=' + port + ' --remote-debugging-address=127.0.0.1',
+      WEBVIEW2_USER_DATA_FOLDER: browserProfile },
   });
-  launched = child;
+  const pid = Number(stdout.trim());
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error('The native AgentDock process identifier was not returned.');
+  launched = { pid };
   const endpoint = 'http://127.0.0.1:' + port;
-  await until(async () => (await fetch(endpoint + '/json/version', { signal: AbortSignal.timeout(600) })).ok, 'WebView2 inspector');
-  browser = await chromium.connectOverCDP(endpoint, { timeout: 10000 });
+  const debuggerURL = await until(async () => {
+    const { stdout } = await execFile('curl.exe', ['--noproxy', '*', '--max-time', '2', '-fsS', endpoint + '/json/version'], { timeout: 2600 });
+    return JSON.parse(stdout).webSocketDebuggerUrl;
+  }, 'WebView2 inspector');
+  browser = await chromium.connectOverCDP(debuggerURL, { timeout: 10000 });
   const page = await until(() => browser.contexts().flatMap(context => context.pages()).find(item => !item.url().startsWith('devtools')), 'workspace page');
   page.setDefaultTimeout(10000);
   page.on('pageerror', error => console.log('WEBVIEW ERROR ' + error.message));
@@ -71,12 +82,18 @@ async function close(page) {
   await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     '(Get-Process -Id ' + pid + ').CloseMainWindow() | Out-Null']);
   const decision = page.getByRole('dialog', { name: 'Close AgentDock' });
-  if (await decision.isVisible().catch(() => false)) {
+  await until(async () => !alive(pid) || await decision.isVisible().catch(() => false), 'close confirmation');
+  if (alive(pid) && await decision.isVisible().catch(() => false)) {
     await decision.getByRole('button', { name: 'Close AgentDock' }).click();
   }
-  await until(() => launched.exitCode !== null || launched.signalCode !== null, 'AgentDock close');
+  await until(() => !alive(pid), 'AgentDock close');
   browser = null;
   launched = null;
+}
+
+function alive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error.code !== 'ESRCH'; }
 }
 
 const tty = page => page.locator('.pane.active .xterm-helper-textarea');
@@ -128,13 +145,13 @@ async function captureWorkspace() {
 try {
   let { page, startup } = await start();
   const clip = page.locator('.intro-video');
-  if (await clip.count()) {
-    await until(() => clip.evaluate(video => video.currentTime > 0 && video.videoWidth === 640), 'Tux video decoding', 2800);
-    await page.getByRole('button', { name: 'Skip intro' }).click();
-    result('Installed-webview Tux clip decoded, playback and skip');
-  } else {
-    throw new Error('The launch animation was not present.');
+  if (!await clip.count()) {
+    await page.keyboard.press('Control+Shift+P');
+    await page.getByRole('button', { name: 'Replay Tux intro', exact: true }).click();
   }
+  await until(() => clip.evaluate(video => video.currentTime > 0 && video.videoWidth === 640), 'Tux video decoding', 2800);
+  await page.getByRole('button', { name: 'Skip intro' }).click();
+  result('Native WebView2 Tux clip decoded, playback and skip');
   await sample('idle', 0, startup);
   result('Native workspace booted in ' + startup + ' ms with CDP attached');
   await openProject(page, ubuntu);
@@ -145,6 +162,7 @@ try {
   await command(page, 'printf "ADPLATFORM=%s/%s\\n" "$(uname -s)" "$WSL_DISTRO_NAME"');
   await textInTerminal(page, 'ADPLATFORM=Linux/' + distro);
   const linuxId = await page.locator('.pane.active').getAttribute('data-session');
+  const linuxTab = await page.locator('.tab[aria-current=page]').getAttribute('data-tab-id');
   result('Ubuntu real PTY, ANSI, Unicode, Linux kernel, exact WSL distribution and cwd');
 
   await openProject(page, windows);
@@ -152,16 +170,25 @@ try {
   await command(page, "Write-Output ('AD'+'POWER'); (Get-Location).Path");
   await textInTerminal(page, 'ADPOWER');
   await textInTerminal(page, windows);
+  await command(page, "$t=Start-Process powershell.exe -ArgumentList '-NoProfile -Command Start-Sleep -Seconds 90' -WindowStyle Hidden -PassThru; Write-Output ('AD'+'CHILD='+$t.Id)");
+  await textInTerminal(page, 'ADCHILD=');
+  const childPid = Number((await buffer(page).textContent()).match(/ADCHILD=(\d+)/)?.[1]);
+  assert.ok(Number.isInteger(childPid) && alive(childPid), 'controlled PowerShell child process exists');
   result('Windows folder and interactive PowerShell ConPTY');
   await toolbar(page, 'Worktrees').click();
   const nativeTrees = page.getByRole('dialog', { name: 'Git worktrees' });
   await nativeTrees.getByText('windows-linked', { exact: true }).waitFor();
   await nativeTrees.getByRole('button', { name: 'Close' }).click();
   result('Discovered linked worktree created by Git for Windows');
+  await page.locator('.pane.active .pane-caption').dragTo(page.locator('[data-tab-id="' + linuxTab + '"]'));
+  await until(() => page.locator('.pane').count().then(count => count === 2), 'cross-project split');
+  result('Dragged PowerShell across tabs into a split with the Ubuntu terminal');
   await page.locator('.pane.active').getByRole('button', { name: 'Terminal actions' }).click();
   await page.getByRole('button', { name: 'Terminate terminal' }).click();
   await page.getByRole('dialog', { name: 'Terminate terminal' }).getByRole('button', { name: 'Terminate' }).click();
   await until(() => page.locator('[data-terminal-id]').count().then(count => count === 1), 'bounded PowerShell termination');
+  await until(() => !alive(childPid), 'PowerShell process job cleanup');
+  result('Explicit PowerShell termination cleaned its controlled child process');
 
   await page.locator('[data-terminal-id="' + linuxId + '"]').click();
   await cmdAfterMount(page, 'printf "AD%s\\n" "$ADKEEP"');
@@ -200,8 +227,10 @@ try {
   await toolbar(page, 'Development').click();
   const dev = page.getByRole('dialog', { name: 'Development' });
   await dev.getByText('Local branches', { exact: true }).waitFor();
+  await dev.getByRole('button', { name: 'Load pull requests' }).click();
+  await until(() => dev.getByRole('button', { name: 'Refresh' }).count().then(count => count > 1), 'GitHub CLI response');
   await dev.getByRole('button', { name: 'Load containers' }).click();
-  await until(() => dev.getByRole('button', { name: 'Refresh' }).count().then(count => count > 1), 'Docker CLI response');
+  await until(() => dev.getByRole('button', { name: 'Refresh' }).count().then(count => count > 2), 'Docker CLI response');
   await dev.getByRole('button', { name: 'Done' }).click();
   result('CLI-based worktree, branch and on-demand Docker panel');
 
@@ -230,7 +259,7 @@ try {
   await textInTerminal(page, 'ADHIGHOUTPUT', 30000);
   result('Responsive ConPTY/tmux rendering through 12,000 output lines');
 
-  await toolbar(page, 'Workflow templates').click();
+  await toolbar(page, 'Workflows').click();
   const workflows = page.getByRole('dialog', { name: 'Workflow prompts' });
   await workflows.getByRole('combobox', { name: 'Workflow template' }).selectOption({ label: 'Engineering workflow (built-in)' });
   assert.match(await workflows.getByLabel('Preview').inputValue(), /Agentic engineering workflow/);
@@ -264,7 +293,7 @@ try {
 } finally {
   await captureWorkspace();
   // This is only the exact child created by this script and fixture session IDs.
-  if (launched && launched.exitCode === null) launched.kill();
+  if (launched && alive(launched.pid)) process.kill(launched.pid);
   for (const id of sessionIds) {
     if (!/^[a-f0-9-]{36}$/i.test(id)) continue;
     await execFile('wsl.exe', ['--distribution', distro, '--exec', '/usr/bin/tmux', '-L', 'agentdock-v1', 'kill-session', '-t', '=ad-' + id], { timeout: 8000 }).catch(() => {});

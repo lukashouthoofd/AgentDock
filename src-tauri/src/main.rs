@@ -383,6 +383,14 @@ async fn spotify_play(
 }
 
 fn main() {
+    #[cfg(windows)]
+    if std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {
+        // Process-local options. Terminal rendering is DOM-based and the intro uses software VP8 decode.
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--disable-gpu --disable-accelerated-video-decode",
+        );
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(window) = app.get_webview_window("main") {

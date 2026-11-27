@@ -138,6 +138,7 @@ function gitInfo(item, path = item.path) { return worktreeInfo.get(`${item.id}\n
 
 function chooseProject(item, path = null) {
   model.project = item.id;
+  model.recent = [item.id, ...model.recent.filter(id => id !== item.id)].slice(0, 36);
   model.worktree = path && path !== item.path ? path : null;
   collapsed.delete(item.id);
   const matching = activeTab() && leaves(activeTab().tree).find(id => {
@@ -253,16 +254,21 @@ async function normalizeProject(path, distro) {
       native: location.native, distro: location.distro || distro, color: '#b7c9e7' };
     model.projects.push(item);
   }
-  model.recent = [item.id, ...model.recent.filter(id => id !== item.id)].slice(0, 36);
   chooseProject(item);
   return item;
 }
 
 async function openProject() {
+  await ready;
   const path = input('', { placeholder: 'C:\\Projects\\repo or ~/projects/repo', spellcheck: 'false' });
   const distro = select((distros.length ? distros : [projectDistro()]).map(name => [name, name]), projectDistro());
   const form = el('form', { class: 'field-stack' }, field('Folder path', path), field('Ubuntu distribution', distro));
-  const ui = dialog('Open project folder', form);
+  const recentItems = model.recent.map(id => model.projects.find(item => item.id === id)).filter(Boolean).slice(0, 6);
+  const recent = recentItems.length ? el('div', { class: 'recent-folders' },
+    el('h3', { text: 'Recent projects' }),
+    ...recentItems.map(item => button(item.name, () => { chooseProject(item); ui.close(); },
+      { icon: 'folder-open', title: item.path }))) : null;
+  const ui = dialog('Open project folder', [form, recent]);
   const submit = busy(async () => { await normalizeProject(path.value.trim(), distro.value); ui.close(); }, ui.error);
   form.addEventListener('submit', event => { event.preventDefault(); submit(event); });
   ui.footer.append(button('Browse folders', busy(async () => {
@@ -272,7 +278,8 @@ async function openProject() {
   path.focus();
 }
 
-function cloneProject() {
+async function cloneProject() {
+  await ready;
   const remote = input('', { placeholder: 'https://github.com/owner/repository.git', spellcheck: 'false' });
   const destination = input(model.settings.cloneRoot + '/', { spellcheck: 'false' });
   const distro = select((distros.length ? distros : [projectDistro()]).map(name => [name, name]), projectDistro());
@@ -319,7 +326,8 @@ function editItem(item, kind) {
   title.select();
 }
 
-function openSettings() {
+async function openSettings() {
+  await ready;
   const current = model.settings;
   const distro = select((distros.length ? distros : [projectDistro()]).map(name => [name, name]), projectDistro());
   const cloneRoot = input(current.cloneRoot);
@@ -511,7 +519,7 @@ function palette() {
     ['Git worktrees', openWorktrees], ['Development status', openDevPanel], ['Merge local branch', mergeBranch], ['Environment variables', () => project() && dotenvEditor(project(), rootPath())],
     ['Workflow templates', () => openWorkflow('prompt')], ['/goal objective', () => openWorkflow('goal')],
     ['/loop task', () => openWorkflow('loop')], ['Toggle window fullscreen', fullscreen],
-    ['Spotify', openSpotify], ['Settings', openSettings],
+    ['Spotify', openSpotify], ['Replay Tux intro', playIntro], ['Settings', openSettings],
     ...model.projects.map(item => [`Project: ${item.name}`, () => chooseProject(item)]),
     ...Object.values(model.sessions).map(session => [`Terminal: ${session.title}`, () => activate(session.id)]),
     ...(project() ? (gitInfo(project())?.worktrees || []).map(tree => [
@@ -797,7 +805,9 @@ function paintStats() {
     ['Available', formatBytes(sample?.available)],
     ['CPU', sample && Number.isFinite(sample.cpu) ? `${sample.cpu.toFixed(0)}%` : '—'],
     ['WSL', formatBytes(sample?.windowsSubsystem)],
-    ['AgentDock', formatBytes(sample?.agentDock)],
+    ['AgentDock', Number.isFinite(sample?.agentDockPrivate)
+      ? formatBytes(sample.agentDockPrivate) + ' private / ' + formatBytes(sample.agentDock) + ' summed'
+      : formatBytes(sample?.agentDock)],
     ['Sessions', String([...health.values()].filter(state => state.running && model.sessions[state.id]).length)],
   ];
   statusBar.replaceChildren(...values.map(([name, value]) =>
@@ -917,4 +927,4 @@ async function init() {
   tick().catch(reportError);
 }
 
-init().catch(reportError);
+const ready = init().catch(reportError);
