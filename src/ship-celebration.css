@@ -1,0 +1,183 @@
+/* Ship It. A little freight train for a verified local merge. */
+:root {
+  --ship-paper: #222527;
+  --ship-ink: #f9e9cd;
+  --ship-muted: #dfccad;
+  --ship-gold: #f7c177;
+  --ship-copper: #d47364;
+  --ship-dark: #171b20;
+  --ship-wheel: #ada393;
+  --ship-border: #5b5146;
+  --ship-shadow: #15181bba;
+  --ship-font: system-ui, "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+}
+
+.ship-moment {
+  position: fixed;
+  z-index: 200;
+  inset-inline: 0;
+  inset-block-end: 52px;
+  width: min(520px, calc(100% - 32px));
+  margin-inline: auto;
+  box-sizing: border-box;
+  overflow: clip;
+  padding: 14px 16px 9px;
+  border: 1px solid var(--ship-border);
+  border-radius: 9px;
+  background: var(--ship-paper);
+  box-shadow: 0 6px 20px var(--ship-shadow);
+  color: var(--ship-ink);
+  font-family: var(--ship-font);
+  pointer-events: none;
+}
+
+.ship-text {
+  padding-inline-end: 28px;
+  color: var(--ship-ink);
+  font-size: clamp(14px, 3.5vw, 22px);
+  font-weight: 750;
+  line-height: 1.25;
+}
+
+.ship-route {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-block-start: 3px;
+  padding-inline-end: 25px;
+  color: var(--ship-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.ship-source,
+.ship-destination {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ship-route-arrow { color: var(--ship-gold); }
+
+.ship-close {
+  position: absolute;
+  inset-block-start: 9px;
+  inset-inline-end: 8px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  background: var(--ship-paper);
+  color: var(--ship-ink);
+  font-family: inherit;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.ship-close:hover { border-color: var(--ship-border); }
+.ship-close:active { background: var(--ship-dark); }
+.ship-close:focus-visible { outline: 2px solid var(--ship-gold); outline-offset: 1px; }
+
+.ship-railway {
+  position: relative;
+  height: 47px;
+  margin-block-start: 1px;
+  overflow: clip;
+}
+
+.ship-track {
+  position: absolute;
+  inset: auto 0 2px;
+  height: 5px;
+  border-block-start: 1px solid var(--ship-border);
+  border-block-end: 1px solid var(--ship-border);
+  background: repeating-linear-gradient(90deg, transparent 0 10px,
+    var(--ship-border) 10px 13px);
+}
+
+.ship-train {
+  position: absolute;
+  z-index: 1;
+  inset-block-end: 9px;
+  inset-inline-end: 10px;
+  display: flex;
+  align-items: flex-end;
+  column-gap: 5px;
+  animation: ship-arrive 1500ms cubic-bezier(.15, .72, .3, 1) both;
+}
+
+.ship-car,
+.ship-engine {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 18px;
+  border-radius: 3px;
+  background: var(--ship-copper);
+  color: var(--ship-dark);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.ship-caboose { background: var(--ship-muted); }
+
+.ship-engine {
+  width: 43px;
+  height: 25px;
+  border-radius: 4px 12px 3px 3px;
+  background: var(--ship-gold);
+  font-size: 14px;
+}
+
+.ship-car::before,
+.ship-car::after,
+.ship-engine::before,
+.ship-engine::after {
+  position: absolute;
+  inset-block-end: -5px;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border: 2px solid var(--ship-wheel);
+  border-radius: 50%;
+  background-color: var(--ship-dark);
+  content: '';
+}
+
+.ship-car::before, .ship-engine::before { inset-inline-start: 4px; }
+.ship-car::after, .ship-engine::after { inset-inline-end: 4px; }
+
+.ship-steam {
+  position: absolute;
+  inset-block-end: 27px;
+  inset-inline-end: 11px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ship-gold);
+  opacity: 0;
+  animation: ship-steam 950ms 900ms ease-out both;
+}
+
+.ship-steam-medium { animation-delay: 1100ms; }
+.ship-steam-large { animation-delay: 1300ms; }
+
+@keyframes ship-arrive {
+  from { transform: translateX(-540px); }
+  70% { transform: translateX(3px); }
+  84% { transform: translateX(-4px); }
+  to { transform: translateX(0); }
+}
+
+@keyframes ship-steam {
+  from { transform: translate(0, 0) scale(.5); opacity: .8; }
+  to { transform: translate(-24px, -16px) scale(2); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ship-train, .ship-steam { animation: none; }
+}
