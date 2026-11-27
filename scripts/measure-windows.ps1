@@ -15,10 +15,130 @@ param(
     [ValidateRange(1, 10)]
     [double] $IntervalSeconds = 2,
     [ValidateRange(0, 30)]
-    [double] $QuietSeconds = 4
+    [double] $QuietSeconds = 4,
+    [switch] $Proportional,
+    [ValidateRange(1, 1048576)]
+    [int] $ProportionalMaxPages = 262144
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$wslClientNames = @('wsl.exe', 'wslhost.exe', 'wslrelay.exe')
+
+if ($Proportional -and !('AgentDock.Bench.WorkingSetPages' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace AgentDock.Bench
+{
+    public static class WorkingSetPages
+    {
+        private const uint QueryInformationAndVmRead = 0x0410;
+        private const int ErrorBadLength = 24;
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr OpenProcess(uint access, bool inheritHandle, int processId);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool GetProcessTimes(
+            IntPtr process, out long created, out long exited, out long kernel, out long user);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("psapi.dll", SetLastError = true)]
+        private static extern bool QueryWorkingSet(IntPtr process, IntPtr buffer, uint bytes);
+
+        public sealed class Sample
+        {
+            public int Pages;
+            public int SaturatedPages;
+            public int UnavailableProcesses;
+            public int LimitHits;
+            public double AttributedBytes;
+        }
+
+        private static ulong ReadWord(IntPtr buffer, int index)
+        {
+            int offset = IntPtr.Size * index;
+            return IntPtr.Size == 8
+                ? unchecked((ulong)Marshal.ReadInt64(buffer, offset))
+                : unchecked((uint)Marshal.ReadInt32(buffer, offset));
+        }
+
+        public static Sample Read(int[] processIds, long[] creationTimes, int pageLimit)
+        {
+            var result = new Sample();
+            var buffer = Marshal.AllocHGlobal((pageLimit + 1) * IntPtr.Size);
+            try
+            {
+                for (int i = 0; i < processIds.Length; i++)
+                {
+                    int available = pageLimit - result.Pages;
+                    if (available == 0)
+                    {
+                        result.LimitHits += processIds.Length - i;
+                        break;
+                    }
+                    var process = OpenProcess(QueryInformationAndVmRead, false, processIds[i]);
+                    if (process == IntPtr.Zero)
+                    {
+                        result.UnavailableProcesses++;
+                        continue;
+                    }
+                    try
+                    {
+                        long created, exited, kernel, user;
+                        // CIM truncates process creation time. Allow less than one millisecond.
+                        if (!GetProcessTimes(process, out created, out exited, out kernel, out user)
+                            || Math.Abs(created - creationTimes[i]) >= 10000)
+                        {
+                            result.UnavailableProcesses++;
+                            continue;
+                        }
+                        if (!QueryWorkingSet(process, buffer, (uint)((available + 1) * IntPtr.Size)))
+                        {
+                            if (Marshal.GetLastWin32Error() == ErrorBadLength)
+                                result.LimitHits++;
+                            else
+                                result.UnavailableProcesses++;
+                            continue;
+                        }
+                        ulong size = ReadWord(buffer, 0);
+                        if (size > (ulong)available)
+                        {
+                            result.LimitHits++;
+                            continue;
+                        }
+
+                        double pageShares = 0;
+                        for (int page = 1; page <= (int)size; page++)
+                        {
+                            ulong flags = ReadWord(buffer, page);
+                            bool shareable = (flags & (1UL << 8)) != 0;
+                            int count = shareable ? (int)((flags >> 5) & 7UL) : 1;
+                            if (count == 7) result.SaturatedPages++;
+                            pageShares += 1.0 / Math.Max(1, count);
+                        }
+                        result.Pages += (int)size;
+                        result.AttributedBytes += pageShares * Environment.SystemPageSize;
+                    }
+                    finally
+                    {
+                        CloseHandle(process);
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+            return result;
+        }
+    }
+}
+'@
+}
 
 function Get-ProcessInventory {
     @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,ExecutablePath,CreationDate)
@@ -115,7 +235,7 @@ for ($sample = 0; $sample -lt $Samples; $sample++) {
             $ticksDelta = [math]::Max(0, $ticks - $previous.Cpu[$key])
         }
 
-        if ($row.Name -in @('wsl.exe', 'wslhost.exe', 'wslrelay.exe')) {
+        if ($row.Name -in $wslClientNames) {
             $clientPrivate += [double]$counter.WorkingSetPrivate
             $clientWorking += [double]$counter.WorkingSet
             $clientCpu100ns += $ticksDelta
@@ -146,7 +266,7 @@ for ($sample = 0; $sample -lt $Samples; $sample++) {
             $vm += [double]$counters[[int]$row.ProcessId].WorkingSet
         }
     }
-    $frames += [PSCustomObject]@{
+    $frame = [ordered]@{
         AppPrivateMiB = In-MiB $appPrivate
         AppWorkingSetMiB = In-MiB $appWorking
         AppCommitMiB = In-MiB $appCommit
@@ -160,6 +280,20 @@ for ($sample = 0; $sample -lt $Samples; $sample++) {
         SharedWslVmWorkingSetMiB = In-MiB $vm
         WindowsMemoryUsedMiB = In-MiB ($physicalBytes - [double]$memory.AvailableBytes)
     }
+    if ($Proportional) {
+        $members = @($tree | Where-Object { $_.Name -notin $wslClientNames })
+        $processIds = [int[]]@($members | ForEach-Object { $_.ProcessId })
+        $created = [long[]]@($members | ForEach-Object { $_.CreationDate.ToUniversalTime().ToFileTimeUtc() })
+        $pages = [AgentDock.Bench.WorkingSetPages]::Read($processIds, $created, $ProportionalMaxPages)
+        $frame.ProportionalPages = $pages.Pages
+        $frame.ProportionalSaturatedPages = $pages.SaturatedPages
+        $frame.ProportionalUnavailableProcesses = $pages.UnavailableProcesses
+        $frame.ProportionalLimitHits = $pages.LimitHits
+        $frame.AppProportionalMiB = if ($members.Count -gt 0 -and !$pages.UnavailableProcesses -and !$pages.LimitHits) {
+            In-MiB $pages.AttributedBytes
+        }
+    }
+    $frames += [PSCustomObject]$frame
     $previous = @{ Seconds = $timestamp; Cpu = $nextCpu }
     if ($sample -lt $Samples - 1) { Start-Sleep -Milliseconds ([int]($IntervalSeconds * 1000)) }
 }
@@ -169,7 +303,7 @@ foreach ($property in $frames[0].PSObject.Properties.Name) {
     $medians[$property] = Get-Median @($frames | ForEach-Object { $_.$property } | Where-Object { $null -ne $_ })
 }
 $fileVersion = if ($root.ExecutablePath) { (Get-Item -LiteralPath $root.ExecutablePath).VersionInfo.ProductVersion }
-[PSCustomObject]@{
+$report = [ordered]@{
     Label = $Label
     Version = $fileVersion
     TerminalCount = $TerminalCount
@@ -179,3 +313,10 @@ $fileVersion = if ($root.ExecutablePath) { (Get-Item -LiteralPath $root.Executab
     Medians = $medians
     Samples = $frames
 }
+if ($Proportional) {
+    $complete = @($frames | Where-Object { $null -ne $_.AppProportionalMiB }).Count
+    $report.ProportionalCompleteSamples = $complete
+    $report.ProportionalMaxPages = $ProportionalMaxPages
+    if ($complete -ne $Samples) { $medians.AppProportionalMiB = $null }
+}
+[PSCustomObject]$report

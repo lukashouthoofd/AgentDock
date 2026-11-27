@@ -32,6 +32,14 @@ The ten-shell fixtures use interactive Ubuntu Bash with a shared minimal rc file
 
 Stock defaults, fresh profile costs, foreground window scheduling and existing workstation load can affect the measurements. The fixture captures a single launch per run and captures resident values after a quiescence delay. Compositor latency requires a dedicated visual timing test.
 
+## Proportional resident estimate
+
+Add `-Proportional` to the Windows sampler for an opt-in benchmark of the same application tree used by the private and summed working sets. The sampler uses Windows QueryWorkingSet. Each private page contributes its full size. Each shareable page contributes its size divided by its reported ShareCount, with a minimum divisor of one. ShareCount describes system-wide sharing, so the estimate also apportions pages shared with applications outside the measured tree. [QueryWorkingSet](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-queryworkingset) [Working-set page fields](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-psapi_working_set_block)
+
+Read `Medians.AppProportionalMiB` together with `ProportionalCompleteSamples`. The sampler reports the median only when every frame includes every application process. Each frame reports covered entries, saturated entries, unavailable processes and cap hits. The default budget is 262,144 entries across the entire tree per sample, adjustable with `-ProportionalMaxPages`. Ordinary sampler output retains its original fields.
+
+The estimate applies to resident working-set entries. ShareCount has three bits and saturates at seven. A page shared by more processes can therefore receive too much weight. The sampler records entries reporting seven so the reader can gauge this limitation. Duplicate mappings and changes during sequential process reads also affect precision. Use the estimate alongside the ordinary private and summed working sets.
+
 ## Baseline measurements
 
 Measurements ran on the target Windows 11 workstation on 27 November 2026. Each row has seven samples at two-second intervals after a four-second quiescence delay. The Ubuntu runs used Ubuntu-24.04 on WSL2 with kernel 6.18.33.2-microsoft-standard-WSL2.
