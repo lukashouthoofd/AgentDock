@@ -1,0 +1,9 @@
+# Non-login Bash fixture. Bash remains interactive until its terminal closes.
+unset HISTFILE PROMPT_COMMAND
+set +o history
+AGENTDOCK_READY_FILE="${BASH_SOURCE[0]%/*}/shell-$$.ready"
+IFS= read -r AGENTDOCK_SHELL_KERNEL < /proc/sys/kernel/ostype
+printf '%s\n%s\n%s\n' "$$" "$AGENTDOCK_SHELL_KERNEL" "$WSL_DISTRO_NAME" > "$AGENTDOCK_READY_FILE"
+trap 'rm -f -- "$AGENTDOCK_READY_FILE"' EXIT
+printf 'Fixture shell %s / %s (Linux PID %s)\n' "$WSL_DISTRO_NAME" "$AGENTDOCK_SHELL_KERNEL" "$$"
+PS1="[$WSL_DISTRO_NAME] benchmark\$ "
