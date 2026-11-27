@@ -101,6 +101,7 @@ function draggableTerminal(element, id) {
     draggedTerminal = null;
     clearDropTarget();
     paintSidebar();
+    paintTabs();
   });
 }
 
@@ -1298,6 +1299,7 @@ function paintSidebar() {
 }
 
 function paintTabs() {
+  if (draggedTerminal) return;
   const sessions = button('Sessions', () => toggleSessions(), { icon: 'activity', class: 'sessions-toggle',
     title: 'Show terminal sessions (Ctrl+Shift+J)' });
   sessions.setAttribute('aria-pressed', String(model.sessionsVisible));
@@ -1310,7 +1312,8 @@ function paintTabs() {
       if (next) activate(next);
     }, { icon: 'terminal', class: `tab${tab.id === model.active ? ' chosen' : ''}`, title: label,
       data: { tabId: tab.id } });
-    tabButton.draggable = true;
+    if (ids.length === 1) draggableTerminal(tabButton, ids[0]);
+    else tabButton.draggable = true;
     tabButton.setAttribute('aria-current', tab.id === model.active ? 'page' : 'false');
     tabButton.addEventListener('dragstart', event => {
       event.dataTransfer.effectAllowed = 'move';
@@ -1325,7 +1328,10 @@ function paintTabs() {
       event.preventDefault();
       const source = event.dataTransfer.getData(tabDrag);
       const drag = event.dataTransfer.getData(paneDrag);
-      if (source && source !== tab.id) {
+      if (source) {
+        if (source === tab.id) return;
+        draggedTerminal = null;
+        clearDropTarget();
         const from = model.tabs.findIndex(item => item.id === source);
         const to = model.tabs.findIndex(item => item.id === tab.id);
         if (from >= 0 && to >= 0) {
