@@ -296,12 +296,18 @@ async function checkTmuxKeyboard() {
   await keyboard.getByRole('button', { name: 'Restore defaults' }).click();
   await saveShortcuts.click();
   await keyboard.waitFor({ state: 'hidden' });
-  await toolbar(page, 'Command palette').focus();
-  await page.keyboard.press('F6');
-  assert.equal(await projects(page).evaluate(region => region.contains(document.activeElement)), true);
-  await page.keyboard.press('F6');
-  assert.equal(await page.getByRole('navigation', { name: 'Terminal tabs' })
-    .evaluate(region => region.contains(document.activeElement)), true);
+  const branch = page.getByRole('banner', { name: 'Workspace toolbar' }).locator('.branch');
+  await until(() => branch.textContent({ timeout: 1000 }).then(text => text.trim() === 'main'), 'Windows fixture branch');
+  await until(async () => {
+    await toolbar(page, 'Command palette').focus();
+    await page.keyboard.press('F6');
+    return projects(page).evaluate(region => region.contains(document.activeElement));
+  }, 'F6 from toolbar to Projects');
+  await until(async () => {
+    await projects(page).getByRole('button', { name: projectName(windows), exact: true }).focus();
+    await page.keyboard.press('F6');
+    return page.getByRole('navigation', { name: 'Terminal tabs' }).evaluate(region => region.contains(document.activeElement));
+  }, 'F6 from Projects to terminal tabs');
   await page.keyboard.press('Control+Shift+L');
   await pick(page, 'Switch project', projectName(ubuntu));
   await switchProject(page, windows);
@@ -316,14 +322,24 @@ async function checkTmuxKeyboard() {
   const browse = page.getByRole('dialog', { name: 'Browse tmux sessions', exact: true });
   await browse.getByLabel('Search commands').fill(other);
   await browse.getByRole('button', { name: `${other} · ${distro} · 1 pane`, exact: true }).waitFor();
+  const attachStart = performance.now();
+  let promptTime;
   await pick(page, 'Browse tmux sessions', `${name} · ${distro} · 1 pane`);
-  await cmdAfterMount(page, `export AD_QA_TMUX_TOKEN=${token}; printf 'AD%s=%s\\n' 'QA_TMUX' "$AD_QA_TMUX_TOKEN"`);
-  await textInTerminal(page, 'ADQA_TMUX=' + token);
+  try {
+    await until(async () => /\bbash-[\d.]+[$#]/.test(await buffer(page).textContent({ timeout: 1500 })), 'external Bash prompt');
+    promptTime = Math.round(performance.now() - attachStart);
+    await cmdAfterMount(page, `export AD_QA_TMUX_TOKEN=${token}; printf 'AD%s=%s\\n' 'QA_TMUX' "$AD_QA_TMUX_TOKEN"`);
+    await textInTerminal(page, 'ADQA_TMUX=' + token);
+  } catch (error) {
+    const rows = await tmux(socket, 'capture-pane', '-p', '-t', original.id).catch(() => null);
+    if (rows) console.error('Synthetic initial Bash diagnostic', rows.stdout.trim().slice(-600));
+    throw error;
+  }
   const external = await page.locator('.pane.active').getAttribute('data-session');
   const [adopted] = await waitForPanes(socket, name, panes => panes.length === 1, 'external attach PID');
   assert.equal(adopted.pid, original.pid);
   assert.equal(adopted.session, original.session);
-  result('Discovered external tmux sessions on two sockets and attached to the original interactive shell');
+  result(`Discovered external tmux sessions on two sockets and attached to the original interactive shell (${promptTime} ms to Bash prompt)`);
 
   const historyMarker = 'ADQA_HISTORY_' + token;
   await command(page, `printf 'AD%s%s\\n' 'QA_HISTORY_' '${token}'; for ((i=0;i<120;i++)); do printf 'qa scrollback %s\\n' "$i"; done`);
@@ -331,14 +347,22 @@ async function checkTmuxKeyboard() {
   assert.ok(!(await buffer(page).textContent()).includes(historyMarker), 'search term is past the visible terminal rows');
   const pane = page.locator('.pane.active');
   await pane.getByRole('button', { name: 'Find in terminal', exact: true }).click();
-  await pane.getByRole('textbox', { name: 'Find in terminal', exact: true }).fill(historyMarker);
+  const find = pane.getByRole('textbox', { name: 'Find in terminal', exact: true });
+  await find.fill(historyMarker);
   await pane.getByRole('button', { name: 'tmux history', exact: true }).click();
+  try {
+    await find.waitFor({ state: 'hidden', timeout: 25000 });
+    await textInTerminal(page, historyMarker);
+  } catch (error) {
+    const notice = page.locator('#notice:visible .notice-message');
+    if (await notice.isVisible()) console.error('Synthetic tmux history notice', await notice.textContent());
+    throw error;
+  }
   await until(async () => {
     const { stdout } = await tmux(socket, 'display-message', '-p', '-t', original.id, '#{pane_in_mode} #{scroll_position}');
     const [mode, scroll] = stdout.trim().split(' ').map(Number);
     return mode === 1 && scroll > 0;
   }, 'tmux scrollback search enters copy mode and scrolls');
-  await textInTerminal(page, historyMarker);
   await tty(page).focus();
   await page.keyboard.press('Escape');
   await until(async () => (await tmux(socket, 'display-message', '-p', '-t', original.id, '#{pane_in_mode}')).stdout.trim() === '0',
@@ -417,9 +441,22 @@ async function checkTmuxKeyboard() {
   await until(() => page.locator('.pane.active').getAttribute('data-session').then(id => id === external), 'keyboard focus left workspace pane');
   await page.keyboard.press('Control+Alt+ArrowRight');
   await until(() => page.locator('.pane.active').getAttribute('data-session').then(id => id === adjacent), 'keyboard focus right workspace pane');
+  const neighbor = await page.locator('.pane.active').getAttribute('aria-label');
+  await page.keyboard.press('Control+Alt+ArrowLeft');
+  await until(() => page.locator('.pane.active').getAttribute('data-session').then(id => id === external), 'focus tmux shell before keyboard move');
+  await paletteCommand(page, 'Move terminal to another pane', 'Control+F9');
+  await pick(page, 'Move terminal to another pane', `${neighbor} · ${projectName(ubuntu)}`);
+  await pick(page, 'Place terminal', 'Below');
+  await until(() => page.locator('.stage > .split.rows > .pane').evaluateAll((panes, ids) =>
+    panes.length === ids.length && panes.every((pane, index) => pane.dataset.session === ids[index]), [adjacent, external]),
+    'keyboard move to bottom workspace pane');
+  await waitForPanes(socket, renamed, panes => panes.length === 1 && panes[0].pid === original.pid, 'keyboard move preserves tmux Bash');
+  await tty(page).focus();
+  await page.keyboard.press('Control+Alt+ArrowUp');
+  await until(() => page.locator('.pane.active').getAttribute('data-session').then(id => id === adjacent), 'keyboard focus above moved pane');
   await terminateActive(page);
   await waitForPanes(socket, renamed, panes => panes.length === 1 && panes[0].pid === original.pid, 'workspace split is independent of tmux');
-  result('Keyboard split and directional focus operated on workspace panes independently from tmux panes');
+  result('Keyboard split, directional focus, and pane movement preserved the original tmux Bash process');
 
   await page.keyboard.press('Control+Shift+H');
   await page.locator('.pane[data-session="' + external + '"]').waitFor({ state: 'hidden' });
