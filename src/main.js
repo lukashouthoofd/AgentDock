@@ -266,12 +266,18 @@ function currentStatus(session) {
 
 function sessionRunning(session) {
   const local = runtime.get(session.id)?.state;
+  const observed = health.get(session.id);
+  if (usesTmux(session) && !observed?.tmuxConfirmed && !observed?.missing) return local === 'attached';
   if (!usesTmux(session) && local === 'ended') return false;
-  return health.get(session.id)?.running ?? local === 'attached';
+  return observed?.running ?? local === 'attached';
 }
 
 function sessionVisible(session) {
-  return Boolean(session && (sessionRunning(session) || runtime.get(session.id)?.state === 'starting'));
+  if (!session) return false;
+  const local = runtime.get(session.id);
+  if (sessionRunning(session) || local?.state === 'starting') return true;
+  const observed = health.get(session.id);
+  return usesTmux(session) && local?.hasConnected === true && !observed?.tmuxConfirmed && !observed?.missing;
 }
 
 function sessionExited(session) {
@@ -305,7 +311,7 @@ function mark(id, state, message) {
     if (!usesTmux(session) && attention.get(id)?.kind === 'quiet') acknowledgeAttention(id);
     if (Date.now() - (previous.last || 0) > 7500) paintStatus(id);
   } else {
-    runtime.set(id, { ...previous, state, message });
+    runtime.set(id, { ...previous, state, message, hasConnected: state === 'attached' || previous.hasConnected });
     updateSessionLists();
     paintStatus(id);
     if (state === 'attached') applyTerminalFocus(id);
