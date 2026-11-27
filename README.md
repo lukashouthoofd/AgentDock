@@ -47,6 +47,7 @@ The Development panel fetches PR and Docker details on demand. Use the Spotify p
 ## Documentation
 
 - [Architecture and upstream evaluation](docs/architecture.md)
+- [Measured Windows benchmarks](docs/benchmark-method.md)
 - [Engineering workflow template](docs/engineering-template.md)
 - [Development panel](docs/dev-status.md)
 - [Sessions and layout presets](docs/session-view.md)

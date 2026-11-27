@@ -52,3 +52,18 @@ Measurements ran on the target Windows 11 workstation on 27 November 2026. Each 
 | Windows Terminal 1.25.3131.0 portable | 10 | 1374.2 | 2632.4 | 125.27 | 416.13 | 737.97 | 40.98 | 778.95 | 0.0323% |
 
 The ten-shell runs each confirmed ten distinct Ubuntu Bash PIDs. Closing the benchmark root took 3004.2 ms for VS Code and 4033.7 ms for portable Windows Terminal. A final fixture scan found zero surviving Bash processes. These are complete case runs under ordinary workstation load, including other development activity. Earlier trials that failed fixture readiness or command verification were discarded before memory sampling.
+
+## AgentDock measurements
+
+The Windows release build used the same Ubuntu distribution, interactive Bash fixture and seven-frame process sampler. The idle measurement included WebView2 and all attributed child processes. The ten-terminal measurement kept one renderer mounted and verified all ten Bash PIDs with the same fixture probe used for the baselines. The ten shells were configured sequentially through the real UI. Setting them up took 6041 ms, including the automation steps, so that figure should be read separately from the automated baseline launch times.
+
+To reproduce the shell workload, copy `scripts/benchmark-fixtures/shell.rc` and `probe.sh` into a disposable Ubuntu-accessible directory. Open ten blank AgentDock terminals and run `exec /bin/bash --noprofile --rcfile /path/to/fixture/shell.rc -i` in each one. Use `/bin/bash /path/to/fixture/probe.sh` in the same distro to verify the count and RSS. Keep one terminal visible while sampling the full process tree. Terminate the disposable sessions through AgentDock when finished.
+
+| Ubuntu shells | First window, ms | App private WS, MiB | App proportional estimate, MiB | App summed WS, MiB | Windows workload WS, MiB | Linux shell RSS, MiB | Combined RSS, MiB | Idle CPU |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 155 | 91.51 | 132.58 | 384.39 | 384.39 | 0.00 | 384.39 | 0.1401% |
+| 10 | 155 | 114.25 | 162.44 | 454.76 | 487.66 | 40.99 | 528.65 | 0.2503% |
+
+The app’s private resident memory and proportional estimate were below the 150 MiB idle and 350 MiB ten-session targets. The summed working sets, which count shared mappings in each process, exceeded both targets. All seven proportional frames covered the complete app tree in each case. The workstation’s entire WSL VM measured 9845.87 MiB at idle and 9938.47 MiB with the fixtures. It was running other work, so those figures cannot be attributed to AgentDock.
+
+The 20-terminal desktop run separately verified three creation and termination cycles with one mounted renderer. It rendered the marker following 12,000 lines of output in 201 ms. VS Code and Windows Terminal were compared for startup, CPU and memory. Their output latency was not measured on the same instrumented flow.

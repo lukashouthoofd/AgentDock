@@ -7,9 +7,9 @@ The target is a lightweight installed Windows terminal workspace. Ubuntu on WSL 
 - [x] Confirm Windows toolchain, WebView2, Ubuntu, tmux and installed CLI versions.
 - [x] Inspect requested upstreams and choose reusable terminal components.
 - [x] Implement and commit the workspace and session lifecycle, including secondary panels and animations.
-- [ ] Exercise actual Windows release and inspect independent review findings.
-- [ ] Measure AgentDock, Windows Terminal and VS Code using equivalent local fixtures.
-- [ ] Install current-user release, verify shortcuts and installed application.
+- [x] Exercise the actual Windows release build and resolve the independent review findings.
+- [x] Measure AgentDock, Windows Terminal and VS Code using equivalent local Bash fixtures.
+- [x] Install the current-user release and verify both shortcuts and the installed application.
 - [ ] Publish verified source to the authorized private GitHub repository.
 
 ## Resume notes
@@ -23,3 +23,7 @@ The source includes the compact Development panel, the local Tux video, Spotify 
 The first Windows release executable compiled and displayed the AgentDock window. The WebView2 automation connection opened via the native test launch. A Windows UI pilot confirmed Linux and Ubuntu-24.04 from inside an AgentDock terminal. Independent benchmarks and remaining desktop checks use a fresh verification application profile because other Claude sessions started in the original preview. Benchmark baselines for VS Code and Windows Terminal are in the repository. Live Spotify search and library authorization passed in a separate native verification process. Clean AgentDock process-tree samples, the complete native desktop checks, installer and shortcut verification, and the private push remain delivery gates.
 
 The native verification rerun passed through the terminal, Git, dotenv and workflow checks. It reached 17 live Ubuntu terminals before the former tab row expanded the workspace and obscured the toolbar. The updated tab strip keeps its action buttons fixed. A native Windows release test verified the two plus menus and dragging a live Windows process from the sidebar and by its pane header into all four positions beside an Ubuntu shell. The latest source adds named layouts, notification-based attention, configurable launch permissions and Prompt Studio model selection. The complete native test includes layout restoration and 20 sessions.
+
+The native run also verified saved layout restoration, process-preserving hide, a terminal bell and acknowledgment. A later run captured the actual WSL helper timeout under workstation memory pressure. The current attach path starts the tmux client directly through ConPTY. Health calls coalesce, and the Git observer processes its small batch sequentially and yields to open dialogs and terminal transitions. A subsequent Windows test passed the split and dotenv steps where that timeout had occurred.
+
+The verified native release was bundled into a 2.93 MiB current-user Windows installer. Both shortcuts target the installed binary, and the desktop shortcut uses its icon. The installed app reopened an existing Ubuntu terminal and launched normally through the desktop shortcut. After the local merge tests passed, the exact legacy Windows Claude Ship It registration was removed with a local backup.
