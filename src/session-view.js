@@ -40,6 +40,7 @@ function snapshot(row, now) {
     label: row.label || 'Unobserved',
     tone: tones.has(row.tone) ? row.tone : '',
     running: row.running === true,
+    starting: row.starting === true,
     visible: row.visible === true,
     inLayout: row.inLayout === true || row.visible === true,
     pinned: row.pinned === true,
@@ -54,15 +55,15 @@ function timeNode(time) {
 }
 
 export function createSessionsView({
-  activate, dock, hide, close, saveLayout, restoreLayout, deleteLayout, acknowledge, settings, pin,
+  activate, dock, hide, terminate, close, saveLayout, restoreLayout, deleteLayout, acknowledge, settings, pin,
 }) {
   const search = input('', {
     type: 'search', placeholder: 'Find a session…', 'aria-label': 'Find sessions', spellcheck: 'false',
   });
   const scope = select([
-    ['all', 'All sessions'], ['running', 'Running'], ['project', 'This project'],
+    ['project-running', 'Running in this project'], ['running', 'Running in all projects'], ['all', 'All sessions'],
     ['pinned', 'Pinned'], ['attention', 'Needs attention'],
-  ], 'all', { 'aria-label': 'Filter sessions' });
+  ], 'project-running', { 'aria-label': 'Filter sessions' });
   const count = el('span', { class: 'session-rail-count' });
   const projectName = el('strong', { class: 'session-rail-ellipsis' });
   const list = el('ul', { class: 'session-rail-list', 'aria-label': 'Matching sessions' });
@@ -72,7 +73,7 @@ export function createSessionsView({
     el('header', { class: 'session-rail-heading' },
       el('h2', { text: 'Sessions' }), count,
       accessLayouts ? button('Layouts', openLayouts, { title: 'Named layout presets', class: 'session-rail-layout-trigger' }) : null,
-      button('Close sessions', close, { only: true, icon: 'x' })),
+      button('Hide Sessions panel', close, { only: true, icon: 'x' })),
     el('div', { class: 'session-rail-controls' },
       el('p', { class: 'session-rail-project' }, el('span', { text: 'Current project' }), projectName),
       search, scope),
@@ -160,6 +161,9 @@ export function createSessionsView({
       }),
       hide ? run('Hide', () => hide(row.id), {
         action: 'hide', disabled: !row.inLayout, title: `Hide ${row.title} and keep the terminal session`,
+      }) : null,
+      terminate ? run(`Close terminal ${row.title}`, () => terminate(row.id), {
+        action: 'terminate', icon: 'x', only: true,
       }) : null));
     item.style.setProperty('--rail-session-color', row.color);
     return item;
@@ -170,13 +174,12 @@ export function createSessionsView({
     const currentName = currentProject?.name || 'None';
     projectName.textContent = currentName;
     projectName.title = currentName;
-    scope.options[2].disabled = !currentProject;
-    if (scope.value === 'project' && !currentProject) scope.value = 'all';
     const terms = search.value.trim().toLocaleLowerCase('en').split(/\s+/).filter(Boolean);
     const now = Date.now();
     const visible = rows.map(row => snapshot(row, now)).filter(row => {
-      if (scope.value === 'running' && !row.running) return false;
-      if (scope.value === 'project' && !isCurrent(row)) return false;
+      const live = row.running || row.starting;
+      if (scope.value === 'running' && !live) return false;
+      if (scope.value === 'project-running' && (!live || !isCurrent(row))) return false;
       if (scope.value === 'pinned' && !row.pinned) return false;
       if (scope.value === 'attention' && !row.attention) return false;
       const text = [row.title, row.role, row.project, row.distro, row.workspace, row.path, row.kind, row.label, row.attention]
@@ -186,8 +189,9 @@ export function createSessionsView({
     const key = JSON.stringify([activeId, rows.length, visible]);
     if (key === signature) return;
     signature = key;
-    count.textContent = visible.length === rows.length ? String(visible.length) : `${visible.length} of ${rows.length}`;
-    empty.textContent = rows.length ? 'No sessions match these filters.' : 'No terminal sessions yet.';
+    count.textContent = String(visible.length);
+    empty.textContent = scope.value === 'project-running' && !terms.length ? 'No running sessions in this project.'
+      : rows.length ? 'No sessions match these filters.' : 'No terminal sessions yet.';
     empty.hidden = visible.length > 0;
     const focused = list.contains(document.activeElement) ? document.activeElement.dataset : null;
     list.replaceChildren(...visible.map(draw));

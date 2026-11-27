@@ -2,7 +2,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
 import { dotenvEditor, workflowEditor } from './editors.js';
-import { arrangeTerminal, initialModel, launchCommand, leaves, formatBytes, removeTerminal, restoreLayout, splitLeaf } from './model.js';
+import { arrangeTerminal, initialModel, launchCommand, leaves, formatBytes, pinnedProjects, projectTabs, removeTerminal,
+  restoreLayout, splitLeaf, tabProject } from './model.js';
 import { playIntro } from './intro.js';
 import { openDevelopment } from './dev-status.js';
 import { celebrateShip } from './ship-celebration.js';
@@ -15,8 +16,10 @@ import './style.css';
 const view = new Map();
 const waiters = new Map();
 const hiding = new Map();
+const launchFailures = new Map();
+const closingTerminals = new Set();
 const worktreeInfo = new Map();
-const collapsed = new Set();
+const projectExpansion = new Map();
 const runtime = new Map();
 const health = new Map();
 const paneLabels = new Map();
@@ -48,6 +51,7 @@ let closed = false;
 let closing = false;
 let sample;
 let healthFlight;
+let visibleSessionsKey;
 const mergeSince = new Map();
 const observedKeys = new Set();
 const appMergeNotices = new Set();
@@ -62,7 +66,7 @@ let mergeInFlight = false;
 let gitRefreshTime = 0;
 
 const project = () => model.projects.find(item => item.id === model.project);
-const activeTab = () => model.tabs.find(item => item.id === model.active);
+const activeTab = () => projectTabs(model).find(item => item.id === model.active);
 const activeSession = () => model.sessions[focused];
 const rootPath = () => model.worktree || project()?.path;
 const specFor = (session, launcher) => ({
@@ -119,13 +123,17 @@ function save() {
   return saved;
 }
 
-function projectDistro() { return model.settings.distro || distros.find(name => /^ubuntu/i.test(name)) || distros[0] || 'Ubuntu'; }
+function projectDistro() {
+  return model.settings.distro || distros.find(name => /^ubuntu/i.test(name)) || project()?.distro
+    || model.projects.find(item => /^ubuntu/i.test(item.distro))?.distro || distros[0] || 'Ubuntu';
+}
 
 const sessionRail = createSessionsView({
   activate,
   dock: (id, axis) => focused && leaves(activeTab()?.tree).includes(focused)
     ? moveTerminal(id, focused, axis === 'rows' ? 'below' : 'right') : activate(id),
   hide: detach,
+  terminate: id => model.sessions[id] && closeTerminal(model.sessions[id]),
   close: () => toggleSessions(false),
   saveLayout: saveCurrentLayout,
   restoreLayout: applyLayout,
@@ -171,7 +179,8 @@ function paintSessions() {
       lastOutput: Math.max(info?.lastOutput || 0, runtime.get(session.id)?.last || 0),
       quietSince: alert?.kind === 'quiet' ? alert.since : null,
       attention: alert?.kind === 'bell' ? 'Terminal bell' : alert ? 'Quiet-watch threshold reached' : null,
-      running: info?.running || runtime.get(session.id)?.state === 'attached',
+      running: sessionRunning(session),
+      starting: runtime.get(session.id)?.state === 'starting',
       inLayout: inLayout.has(session.id), visible: visible.includes(session.id), pinned: session.pinned,
     };
   });
@@ -195,9 +204,10 @@ function applyLayout(id) {
   const layout = model.layouts.find(item => item.id === id);
   if (!layout) return false;
   ({ focused, maximized } = restoreLayout(model, layout));
-  const session = model.sessions[focused];
-  model.project = session?.project || layout.project;
-  model.worktree = session ? (session.path === project()?.path ? null : session.path) : layout.worktree;
+  const restored = model.tabs.find(tab => tab.id === model.active);
+  selectProject(restored ? tabProject(model, restored) : layout.project);
+  selectTerminalPath(focused);
+  if (!restored) model.worktree = layout.worktree;
   render();
   return save();
 }
@@ -222,6 +232,7 @@ function acknowledgeAttention(id) {
 function currentStatus(session) {
   const local = runtime.get(session.id);
   const observed = health.get(session.id);
+  if (closingTerminals.has(session.id)) return ['Closing', 'cool'];
   if (local?.state === 'starting') return ['Starting', 'cool'];
   if (!observed?.running && observed?.exitCode != null) return observed.exitCode === 0
     ? ['Exited', 'quiet'] : [`Exit ${observed.exitCode}`, 'bad'];
@@ -234,8 +245,40 @@ function currentStatus(session) {
   return [session.profile === 'ubuntu' ? 'Detached' : 'Exited', 'quiet'];
 }
 
+function sessionRunning(session) {
+  const local = runtime.get(session.id)?.state;
+  if (session.profile === 'powershell' && local === 'ended') return false;
+  return health.get(session.id)?.running ?? local === 'attached';
+}
+
+function sessionVisible(session) {
+  return Boolean(session && (sessionRunning(session) || runtime.get(session.id)?.state === 'starting'));
+}
+
+function sessionExited(session) {
+  const observed = health.get(session.id);
+  if (session.profile === 'ubuntu') return observed?.tmuxConfirmed === true && !observed.running;
+  return runtime.get(session.id)?.state === 'ended' || observed?.running === false;
+}
+
+function visibleTabs() {
+  return projectTabs(model).filter(tab =>
+    tab.id === model.active || leaves(tab.tree).some(id => sessionVisible(model.sessions[id])));
+}
+
+function updateSessionLists() {
+  const key = Object.values(model.sessions).filter(sessionVisible).map(session => session.id).join();
+  if (key === visibleSessionsKey) return;
+  visibleSessionsKey = key;
+  paintSidebar();
+  paintTabs();
+}
+
 function mark(id, state, message) {
+  const session = model.sessions[id];
+  if (!session) return;
   const previous = runtime.get(id) || {};
+  if (state === 'detached' && previous.state === 'ended' && session.profile === 'powershell') return;
   if (state === 'bell') {
     if (model.sessions[id]?.profile === 'powershell') markAttention(id, 'bell');
   } else if (state === 'output') {
@@ -244,6 +287,7 @@ function mark(id, state, message) {
     if (Date.now() - (previous.last || 0) > 7500) paintStatus(id);
   } else {
     runtime.set(id, { ...previous, state, message });
+    updateSessionLists();
     paintStatus(id);
     if (state === 'attached') applyTerminalFocus(id);
   }
@@ -303,6 +347,7 @@ async function readHealth() {
       paintStatus(session.id);
     }
   }
+  updateSessionLists();
   paintSessions();
   paintStats();
 }
@@ -322,41 +367,65 @@ async function refreshGit(item, path = item.path) {
 
 function gitInfo(item, path = item.path) { return worktreeInfo.get(`${item.id}\n${path}`); }
 
+function selectProject(id) {
+  if (model.project !== id) projectExpansion.clear();
+  model.project = id;
+}
+
+function selectTerminalPath(id) {
+  const item = project();
+  const session = model.sessions[id];
+  model.worktree = item && session?.project === item.id && session.path !== item.path ? session.path : null;
+}
+
+function selectTab(tab, id) {
+  selectProject(tabProject(model, tab));
+  if (maximized !== id) maximized = null;
+  model.active = tab.id;
+  const item = project();
+  if (item) item.lastTab = tab.id;
+  focused = focusAfterMount = id;
+  selectTerminalPath(id);
+}
+
 function chooseProject(item, path = null) {
-  model.project = item.id;
+  const sameProject = model.project === item.id;
+  selectProject(item.id);
   model.recent = [item.id, ...model.recent.filter(id => id !== item.id)].slice(0, 36);
   model.worktree = path && path !== item.path ? path : null;
-  collapsed.delete(item.id);
-  const matching = activeTab() && leaves(activeTab().tree).find(id => {
+  projectExpansion.delete(item.id);
+  const tabs = projectTabs(model);
+  const preferred = tabs.find(tab => tab.id === (sameProject ? model.active : item.lastTab));
+  const match = tab => leaves(tab?.tree).filter(id => {
     const session = model.sessions[id];
-    return session?.project === item.id && (!path || session.path === path);
+    return sessionVisible(session) && (!path || (session.project === item.id && session.path === path));
   });
-  const candidate = matching || Object.values(model.sessions).findLast(session =>
-    session.project === item.id && (!path || session.path === path) &&
-    model.tabs.some(tab => leaves(tab.tree).includes(session.id)))?.id;
-  if (candidate) activate(candidate, false);
-  else { paintToolbar(); paintSidebar(); paintSessions(); }
+  const fromPreferred = match(preferred);
+  const matchTab = fromPreferred.length ? preferred : tabs.findLast(tab => match(tab).length);
+  const candidates = match(matchTab);
+  const candidate = candidates.includes(focused) ? focused : candidates[0];
+  if (candidate) {
+    selectTab(matchTab, candidate);
+    model.worktree = path && path !== item.path ? path : null;
+  } else {
+    model.active = null;
+    focused = focusAfterMount = maximized = null;
+  }
+  render();
   save();
   refreshGit(item);
   if (path && path !== item.path) refreshGit(item, path);
 }
 
-function activate(id, updateProject = true) {
+function activate(id) {
   const session = model.sessions[id];
   if (!session) return;
   let tab = model.tabs.find(item => leaves(item.tree).includes(id));
   if (!tab) {
-    tab = { id: crypto.randomUUID(), tree: { id } };
+    tab = { id: crypto.randomUUID(), project: session.project, tree: { id } };
     model.tabs.push(tab);
   }
-  if (maximized !== id) maximized = null;
-  model.active = tab.id;
-  focused = id;
-  focusAfterMount = id;
-  if (updateProject) {
-    model.project = session.project;
-    model.worktree = session.path === project()?.path ? null : session.path;
-  }
+  selectTab(tab, id);
   render();
   save();
 }
@@ -364,9 +433,7 @@ function activate(id, updateProject = true) {
 function focusPane(id) {
   if (focused === id) return;
   focused = id;
-  const session = model.sessions[id];
-  model.project = session.project;
-  model.worktree = project()?.path === session.path ? null : session.path;
+  selectTerminalPath(id);
   paintToolbar();
   paintSidebar();
   paintSessions();
@@ -374,16 +441,18 @@ function focusPane(id) {
   save();
 }
 
-function makeTab(id) {
-  const tab = { id: crypto.randomUUID(), tree: { id } };
+function makeTab(id, projectId) {
+  const tab = { id: crypto.randomUUID(), project: projectId, tree: { id } };
   model.tabs.push(tab);
   return tab;
 }
 
-async function newTerminal(kind = 'blank', axis, item = project(), path = rootPath()) {
+async function newTerminal(kind = 'blank', axis, item = project(), path = item?.path, anchor = focused) {
   if (closing) return;
   if (!item) { await openProject(); return; }
-  if (Object.keys(model.sessions).length >= 64) throw new Error('Remove an unused terminal before opening another.');
+  if (Object.keys(model.sessions).length >= 64) {
+    throw new Error('Close an unused terminal from Sessions. Select All sessions to find previous terminals.');
+  }
   const profile = kind === 'powershell' || kind === 'agy' ? 'powershell' : 'ubuntu';
   const launcher = launchCommand(kind, model.settings);
   const session = {
@@ -391,29 +460,33 @@ async function newTerminal(kind = 'blank', axis, item = project(), path = rootPa
     title: kind === 'blank' ? `${profileName(profile)} ${1 + Object.values(model.sessions).filter(term => term.project === item.id && term.kind === 'blank').length}` : launchNames[kind],
     role: '', color: item.color,
   };
-  const previous = focused;
-  const tab = axis && activeTab() && previous && leaves(activeTab().tree).includes(previous)
-    ? activeTab() : makeTab(session.id);
-  if (axis && tab === activeTab() && previous) tab.tree = splitLeaf(tab.tree, previous, session.id, axis);
+  const splitTab = axis && leaves(activeTab()?.tree).includes(anchor) ? activeTab() : null;
+  const tab = splitTab || makeTab(session.id, item.id);
+  if (splitTab) tab.tree = splitLeaf(tab.tree, anchor, session.id, axis);
   model.sessions[session.id] = session;
-  model.active = tab.id;
-  model.project = item.id;
-  model.worktree = session.path === item.path ? null : session.path;
-  focused = session.id;
-  focusAfterMount = session.id;
   maximized = null;
+  selectTab(tab, session.id);
+  const starting = startTerminal(session, launcher);
+  render();
+  await starting;
+}
+
+function startTerminal(session, launcher) {
   mark(session.id, 'starting');
   const starting = save().then(() => invoke('terminal_create', {
     spec: specFor(session, launcher), cols: 100, rows: 30,
   }));
   waiters.set(session.id, starting);
-  starting.catch(error => mark(session.id, 'unavailable', String(error)))
+  starting.then(() => launchFailures.delete(session.id), error => {
+    launchFailures.set(session.id, String(error));
+    mark(session.id, 'unavailable', String(error));
+  })
     .finally(() => { waiters.delete(session.id); refreshHealth().catch(() => {}); });
-  render();
-  await starting;
+  return starting;
 }
 
 function detach(id) {
+  if (closingTerminals.has(id)) return;
   removeTerminal(model, id);
   if (focused === id) focused = null;
   if (maximized === id) maximized = null;
@@ -422,20 +495,35 @@ function detach(id) {
   save();
 }
 
-async function terminate(session) {
-  if (!await confirmAction('Terminate terminal',
-    `End “${session.title}” and the processes it owns?`, 'Terminate')) return;
-  await Promise.allSettled([waiters.get(session.id), hiding.get(session.id)]);
-  await invoke('terminal_terminate', { spec: specFor(session) });
-  detach(session.id);
-  delete model.sessions[session.id];
-  health.delete(session.id);
-  runtime.delete(session.id);
-  attention.delete(session.id);
-  tmuxBells.delete(session.id);
-  seenQuiet.delete(session.id);
-  render();
-  save();
+async function closeTerminal(session) {
+  const { id } = session;
+  if (!model.sessions[id] || closingTerminals.has(id)) return;
+  closingTerminals.add(id);
+  try {
+    if (!sessionExited(session) && !await confirmAction('Close terminal',
+      `Close “${session.title}” and end its processes?`, 'Close terminal')) return;
+    paintStatus(id);
+    await Promise.allSettled([waiters.get(id), hiding.get(id)]);
+    await invoke('terminal_terminate', { spec: specFor(session) });
+    removeTerminal(model, id);
+    delete model.sessions[id];
+    health.delete(id);
+    runtime.delete(id);
+    attention.delete(id);
+    tmuxBells.delete(id);
+    seenQuiet.delete(id);
+    launchFailures.delete(id);
+    if (focused === id) {
+      focused = focusAfterMount = leaves(activeTab()?.tree)[0] ?? null;
+      selectTerminalPath(focused);
+    } else if (focusAfterMount === id) focusAfterMount = null;
+    if (maximized === id) maximized = null;
+    render();
+    await save();
+  } finally {
+    closingTerminals.delete(id);
+    paintStatus(id);
+  }
 }
 
 async function normalizeProject(path, distro) {
@@ -611,9 +699,20 @@ async function openStudio() {
 
 async function fullscreen() { await desktop.setFullscreen(!await desktop.isFullscreen()); }
 
+function splitTerminal(session, kind, axis) {
+  if (!session) return newTerminal(kind);
+  const item = model.projects.find(project => project.id === session.project);
+  return newTerminal(kind, axis, item, session.path, session.id);
+}
+
+function replacementTerminal(session) {
+  const item = model.projects.find(project => project.id === session.project);
+  return newTerminal(session.kind, null, item, session.path);
+}
+
 function newMenu(session) {
   return pickCommand(session ? 'Split terminal' : 'New terminal',
-    Object.entries(launchNames).map(([key, label]) => [label, () => newTerminal(key, session ? 'columns' : null)]));
+    Object.entries(launchNames).map(([key, label]) => [label, () => splitTerminal(session, key, 'columns')]));
 }
 
 function newProjectMenu() {
@@ -624,17 +723,17 @@ function terminalMenu(session) {
   return pickCommand(session.title, [
     ['Find in terminal', () => view.get(session.id)?.find()],
     ['Rename, colour and role', () => editItem(session, 'terminal')],
-    ['Split side by side', () => newTerminal('blank', 'columns')],
-    ['Split top and bottom', () => newTerminal('blank', 'rows')],
+    ['Split side by side', () => splitTerminal(session, 'blank', 'columns')],
+    ['Split top and bottom', () => splitTerminal(session, 'blank', 'rows')],
     ['Maximize or restore pane', () => { maximized = maximized === session.id ? null : session.id; renderStage(); save(); }],
     ...(attention.has(session.id) ? [['Acknowledge terminal attention', () => acknowledgeAttention(session.id)]] : []),
     ['Toggle full-screen window', fullscreen],
     ['/goal objective', () => openWorkflow('goal')],
     ['/loop task', () => openWorkflow('loop')],
     ['Insert saved prompt', () => openWorkflow('prompt')],
-    [session.profile === 'ubuntu' ? 'Detach terminal' : 'Hide terminal', () => detach(session.id)],
+    ['Hide terminal and keep running', () => detach(session.id)],
     ['Reconnect terminal', () => retryTerminal(session.id)],
-    ['Terminate terminal', () => terminate(session)],
+    ['Close terminal', () => closeTerminal(session)],
   ]);
 }
 
@@ -750,10 +849,8 @@ function palette() {
     ['/loop task', () => openWorkflow('loop')], ['Toggle window fullscreen', fullscreen],
     ['Prompt Studio', openStudio], ['Spotify', openSpotify], ['Replay Tux intro', playIntro], ['Settings', openSettings],
     ...model.projects.map(item => [`Project: ${item.name}`, () => chooseProject(item)]),
-    ...Object.values(model.sessions).map(session => [`Terminal: ${session.title}`, () => activate(session.id)]),
-    ...(project() ? (gitInfo(project())?.worktrees || []).map(tree => [
-      `Worktree: ${tree.branch} ${pathName(tree.path)}`, () => chooseProject(project(), tree.path),
-    ]) : []),
+    ...Object.values(model.sessions).filter(session => session.project === model.project && sessionVisible(session))
+      .map(session => [`Terminal: ${session.title}`, () => activate(session.id)]),
   ]);
 }
 
@@ -768,7 +865,6 @@ function paintToolbar() {
     el('div', { class: 'toolbar-location', title: path || '' },
       el('strong', { text: item?.name || 'Workspace' }),
       branch ? el('span', { class: 'branch' }, icon('git-branch'), branch) : null,
-      model.worktree ? el('span', { class: 'branch' }, icon('git-fork'), pathName(model.worktree)) : null,
     ));
   const actions = el('div', { class: 'toolbar-group toolbar-actions' },
     button('Open', openProject, { icon: 'folder-open', title: 'Open project folder' }),
@@ -790,37 +886,50 @@ function paintToolbar() {
 
 function applySidebar() { sidebar.hidden = !model.sidebar; }
 
+function terminalCloseButton(session, className = '') {
+  return button(`Close terminal ${session.title}`, busy(() => closeTerminal(session)),
+    { icon: 'x', only: true, class: className });
+}
+
 function paintSidebar() {
   if (draggedTerminal) return;
   const list = el('div', { class: 'project-list' });
   const head = el('div', { class: 'sidebar-heading' }, el('h1', { text: 'Projects' }),
     button('New project', newProjectMenu, { icon: 'plus', only: true }));
-  for (const item of model.projects) {
+  const pinned = pinnedProjects(model);
+  const unpinned = model.projects.filter(item => !model.pinnedProjects.includes(item.id));
+  for (const item of [...pinned, ...unpinned]) {
     const selected = item.id === model.project;
-    const expanded = !collapsed.has(item.id);
+    const pinIndex = pinned.indexOf(item);
+    const isPinned = pinIndex !== -1;
+    const shortcut = isPinned && pinIndex < 9 ? `Alt+${pinIndex + 1}` : '';
+    const expanded = projectExpansion.get(item.id) ?? selected;
     const section = el('section', { class: `project-group${selected ? ' selected' : ''}` });
     section.style.setProperty('--project-color', safeColor(item.color));
-    const selectButton = button(item.name, () => chooseProject(item), { class: 'project-name', title: item.path });
-    selectButton.setAttribute('aria-pressed', String(selected && !model.worktree));
+    const selectButton = button(item.name, () => chooseProject(item), {
+      class: 'project-name', title: shortcut ? `${item.path} • ${shortcut}` : item.path,
+    });
+    selectButton.setAttribute('aria-pressed', String(selected));
+    if (shortcut) selectButton.setAttribute('aria-keyshortcuts', shortcut);
     const toggle = button(`${expanded ? 'Collapse' : 'Expand'} ${item.name}`, () => {
-      if (expanded) collapsed.add(item.id);
-      else { collapsed.delete(item.id); refreshGit(item); }
+      projectExpansion.set(item.id, !expanded);
       paintSidebar();
     }, { only: true, icon: expanded ? 'chevron-down' : 'chevron-right' });
     toggle.setAttribute('aria-expanded', String(expanded));
+    const pin = button(`${isPinned ? 'Unpin' : 'Pin'} ${item.name}`, () => {
+      model.pinnedProjects = isPinned ? model.pinnedProjects.filter(id => id !== item.id)
+        : [...model.pinnedProjects, item.id];
+      paintSidebar();
+      sidebar.querySelector(`[data-pin-project="${CSS.escape(item.id)}"]`)?.focus({ preventScroll: true });
+      save();
+    }, { icon: 'pin', only: true, class: 'project-pin', data: { pinProject: item.id } });
+    pin.setAttribute('aria-pressed', String(isPinned));
     section.append(el('div', { class: 'project-heading' }, toggle, selectButton,
+      pin,
       button(`Edit ${item.name}`, () => editItem(item, 'project'), { icon: 'ellipsis', only: true })));
     if (expanded) {
       const sub = el('div', { class: 'project-content' });
-      const branches = gitInfo(item)?.worktrees || [];
-      for (const tree of branches) {
-        if (tree.path.toLowerCase() === item.path.toLowerCase()) continue;
-        sub.append(button(tree.branch || pathName(tree.path), () => chooseProject(item, tree.path), {
-          class: selected && model.worktree === tree.path ? 'worktree-link chosen' : 'worktree-link',
-          icon: 'git-branch', disabled: tree.missing, title: tree.path,
-        }));
-      }
-      for (const session of Object.values(model.sessions).filter(value => value.project === item.id)) {
+      for (const session of Object.values(model.sessions).filter(value => value.project === item.id && sessionVisible(value))) {
         const [label, tone] = currentStatus(session);
         const activity = el('span', { class: `session-status ${tone}`, data: { statusId: session.id }, text: label });
         const text = el('span', { class: 'session-caption' }, el('span', { text: session.title }),
@@ -830,7 +939,7 @@ function paintSidebar() {
           icon('terminal'), text, activity);
         entry.style.setProperty('--session-color', safeColor(session.color));
         draggableTerminal(entry, session.id);
-        sub.append(entry);
+        sub.append(el('div', { class: 'session-entry' }, entry, terminalCloseButton(session, 'session-close')));
       }
       if (selected) {
         sub.append(el('div', { class: 'quick-actions', 'aria-label': 'Launch in this project' },
@@ -852,7 +961,7 @@ function paintTabs() {
   const sessions = button('Sessions', () => toggleSessions(), { icon: 'activity', class: 'sessions-toggle',
     title: 'Show terminal sessions (Ctrl+Shift+J)' });
   sessions.setAttribute('aria-pressed', String(model.sessionsVisible));
-  const tabs = model.tabs.map(tab => {
+  const tabs = visibleTabs().map(tab => {
     const ids = leaves(tab.tree);
     const first = model.sessions[ids[0]];
     const label = first ? first.title + (ids.length > 1 ? ` +${ids.length - 1}` : '') : 'Terminal';
@@ -892,7 +1001,9 @@ function paintTabs() {
       render();
       save();
     });
-    return tabButton;
+    return ids.length === 1 && first
+      ? el('div', { class: 'tab-entry' }, tabButton, terminalCloseButton(first, 'tab-close'))
+      : tabButton;
   });
   tabbar.replaceChildren(el('div', { class: 'tab-strip' }, tabs),
     el('div', { class: 'tab-actions' }, sessions, button('New terminal', () => newMenu(), { icon: 'plus', only: true })));
@@ -958,7 +1069,8 @@ function buildLayout(tree, mounts) {
       renderStage();
       save();
     }, { icon: maximized === session.id ? 'minimize' : 'maximize', only: true }),
-    button('Terminal actions', () => terminalMenu(session), { icon: 'ellipsis', only: true })), content);
+    button('Terminal actions', () => terminalMenu(session), { icon: 'ellipsis', only: true }),
+    terminalCloseButton(session)), content);
   frame.style.setProperty('--session-color', safeColor(session.color));
   frame.addEventListener('dragover', event => {
     if (!event.dataTransfer.types.includes(paneDrag) || draggedTerminal === session.id) return;
@@ -999,9 +1111,18 @@ function hideView(id, terminal, forget = false) {
 }
 
 async function retryTerminal(id) {
+  const session = model.sessions[id];
+  if (!session || closingTerminals.has(id) || waiters.has(id)) return;
   const terminal = view.get(id);
   if (terminal) hideView(id, terminal);
   await hiding.get(id);
+  if (!model.sessions[id] || closingTerminals.has(id) || waiters.has(id)) return;
+  if (launchFailures.has(id)) {
+    const starting = startTerminal(session, launchCommand(session.kind, model.settings));
+    renderStage();
+    await starting;
+    return;
+  }
   renderStage();
 }
 
@@ -1016,11 +1137,13 @@ async function mountViews(mounts, revision) {
     if (!session) continue;
     let terminal = view.get(id);
     if (!terminal) {
-      terminal = new TerminalView(session, model.settings, mark);
+      terminal = new TerminalView(session, model.settings, mark, {
+        retry: () => retryTerminal(id), replace: () => replacementTerminal(session),
+      });
       view.set(id, terminal);
     }
     target.replaceChildren();
-    terminal.mount(target, waiters.get(id));
+    terminal.mount(target, waiters.get(id), launchFailures.get(id));
     applyTerminalFocus(id);
   }
 }
@@ -1081,9 +1204,10 @@ function render() {
 }
 
 function cycleTab(direction) {
-  if (!model.tabs.length) return;
-  const index = model.tabs.findIndex(tab => tab.id === model.active);
-  const next = model.tabs[(index + direction + model.tabs.length) % model.tabs.length];
+  const tabs = visibleTabs();
+  if (!tabs.length) return;
+  const index = tabs.findIndex(tab => tab.id === model.active);
+  const next = tabs[index < 0 && direction < 0 ? tabs.length - 1 : (index + direction + tabs.length) % tabs.length];
   const first = leaves(next.tree)[0];
   if (first) activate(first);
 }
@@ -1099,11 +1223,18 @@ function shortcuts(event) {
       k: () => newTerminal('codex'), w: openWorktrees, e: () => openWorkflow('prompt'),
       b: () => { model.sidebar = !model.sidebar; applySidebar(); save(); },
       j: () => toggleSessions(),
-      '|': () => newTerminal('blank', 'columns'), '_': () => newTerminal('blank', 'rows'),
+      '|': () => splitTerminal(activeSession(), 'blank', 'columns'),
+      '_': () => splitTerminal(activeSession(), 'blank', 'rows'),
+      backspace: activeSession() ? () => closeTerminal(activeSession()) : null,
     };
     action = common[key];
   }
   if (event.ctrlKey && key === 'tab') action = () => cycleTab(event.shiftKey ? -1 : 1);
+  if (event.altKey && !event.ctrlKey && !event.shiftKey) {
+    const number = /^(?:Digit|Numpad)([1-9])$/.exec(event.code)?.[1];
+    const item = number && pinnedProjects(model)[Number(number) - 1];
+    if (item) action = () => chooseProject(item);
+  }
   if (key === 'f11') action = fullscreen;
   if (action) {
     event.preventDefault();
@@ -1164,17 +1295,16 @@ async function tick() {
 
 async function init() {
   render();
-  const [workspaceResult, distroResult] = await Promise.allSettled([
-    invoke('workspace_load'),
-    invoke('host_distros'),
-  ]);
-  if (workspaceResult.status === 'fulfilled') {
-    model = initialModel(workspaceResult.value);
-    focused = model.focused ?? null;
-    maximized = model.maximized ?? null;
-  }
-  else reportError(workspaceResult.reason);
-  if (distroResult.status === 'fulfilled') distros = distroResult.value;
+  invoke('host_distros').then(names => { distros = names; }).catch(() => {});
+  try {
+    model = initialModel(await invoke('workspace_load'));
+    if (activeTab()) {
+      focused = model.focused ?? null;
+      maximized = model.maximized ?? null;
+    } else {
+      model.active = projectTabs(model).find(tab => tab.id === project()?.lastTab)?.id ?? null;
+    }
+  } catch (error) { reportError(error); }
   const item = project();
   render();
   if (model.settings.intro !== false) playIntro();

@@ -14,6 +14,7 @@ const icons = import.meta.glob([
   '/node_modules/lucide/icons/minimize.svg',
   '/node_modules/lucide/icons/music-2.svg',
   '/node_modules/lucide/icons/panel-left.svg',
+  '/node_modules/lucide/icons/pin.svg',
   '/node_modules/lucide/icons/plus.svg',
   '/node_modules/lucide/icons/search.svg',
   '/node_modules/lucide/icons/settings-2.svg',

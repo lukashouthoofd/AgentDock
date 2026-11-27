@@ -95,7 +95,7 @@ pub fn distros() -> Vec<String> {
     #[cfg(windows)]
     {
         let mut command = Command::new(system_exe("wsl.exe"));
-        output(command.args(["--list", "--quiet"]))
+        output_bounded(command.args(["--list", "--quiet"]), Duration::from_secs(8))
             .ok()
             .filter(|out| out.status.success())
             .map(|out| {

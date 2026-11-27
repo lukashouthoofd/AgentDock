@@ -1,8 +1,10 @@
 # Sessions rail
 
-Open Sessions from the terminal tab row or press Ctrl+Shift+J. Search by terminal title, role, project, distribution, worktree path or observed status. Filter for the current project, running terminals, pinned sessions or sessions with attention to review.
+Open Sessions from the terminal tab row or press Ctrl+Shift+J. It opens to the current project's running sessions. Select Running in all projects to bring another project's session into a split, or All sessions to find a previous terminal. Search by terminal title, role, project, distribution, worktree path or observed status.
 
 Open focuses a real terminal. Drag a session title to an edge of a terminal pane to choose left, right, above or below. Use Beside or Below to split relative to the focused terminal with a button. Hide removes the pane from the layout and keeps the session available in the rail. On a narrow app window, the rail temporarily overlays the terminal workspace and clears after opening or placing a terminal. In a wide window, it docks on the right.
+
+Project switching only shows tabs owned by the selected project. A deliberately mixed split belongs to its destination project, and switching projects keeps every running process alive. The Projects sidebar lists running sessions under each expanded project. Worktree discovery and explicit worktree terminal launches live in the Worktrees and Development panels. Standard launches always start in the project root.
 
 Use Layouts to name and save the current arrangement, restore a saved arrangement or delete a preset. Choose a preset manually for either screen. Opening a layout changes pane placement while terminal sessions keep their independent lifecycle.
 

@@ -157,17 +157,21 @@ button.primary:hover, button.primary:active { filter: brightness(1.10); }
 .project-group.selected { background: var(--color-panel); }
 .project-heading { display: flex; gap: 4px; align-items: center; min-width: 0; }
 .project-heading .project-name { justify-content: start; display: block; text-align: left; flex: 1; padding-left: 4px; font-weight: 600; }
+.project-heading .project-pin { width: 24px; color: var(--color-muted); }
+.project-heading .project-pin[aria-pressed='true'] { color: var(--color-accent); }
 .project-content { padding: 4px 4px 4px 8px; }
-.worktree-link, .session-link {
+.session-link {
   width: 100%;
   text-align: left;
   justify-content: start;
   gap: 8px;
   border-color: transparent;
   background: transparent;
+  min-height: 37px;
 }
-.worktree-link { overflow: hidden; text-overflow: ellipsis; padding-left: 8px; }
-.session-link { min-height: 37px; }
+.session-entry { display: flex; align-items: center; }
+.session-entry .session-link { min-width: 0; flex: 1; }
+.session-close { border-color: transparent; background: transparent; padding: 0 4px; }
 .session-link > .icon, .pane-caption > .icon { color: var(--session-color); }
 .session-caption { flex: 1; display: grid; gap: 0; }
 .session-caption small { overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
@@ -192,11 +196,14 @@ button.chosen:hover { background: var(--color-selection); }
   background: var(--color-paper);
 }
 .tab-strip, .tab-actions { display: flex; gap: 4px; }
+.tab-entry { display: flex; flex: none; align-items: stretch; }
 .tab-strip { flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
 .tab-actions { flex: none; }
 .tabs button { border-color: transparent; border-radius: 5px 5px 0 0; background: transparent; flex: 0 0 auto; }
 .tabs button:hover { background: var(--color-raised); }
 .tabs .tab.chosen { background: var(--color-panel); border-bottom-color: var(--color-accent); color: var(--color-ink); }
+.tabs .tab-close { padding-inline: 4px; }
+.tabs .tab-entry:has(.chosen) .tab-close { background: var(--color-panel); border-bottom-color: var(--color-accent); }
 .stage { flex: 1; min-width: 0; min-height: 0; display: flex; background: var(--color-terminal); }
 .stage > * { flex: 1; }
 .empty-workspace { margin: auto; flex: 0 1 auto; min-width: 0; display: grid; justify-items: start; gap: 12px; padding: 24px; }
@@ -265,6 +272,10 @@ button.chosen:hover { background: var(--color-selection); }
   color: var(--color-muted);
   background: var(--color-terminal);
   padding: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 .terminal-find {
   position: absolute;

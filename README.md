@@ -31,6 +31,7 @@ The default installer output is under `src-tauri/target/release/bundle/nsis`. Ca
 | Launch Claude Code | Ctrl+Alt+Shift+C |
 | Launch Codex | Ctrl+Shift+K |
 | Switch terminal tab | Ctrl+Tab |
+| Close focused terminal | Ctrl+Shift+Backspace |
 | Sessions and layout presets | Ctrl+Shift+J |
 | Worktrees | Ctrl+Shift+W |
 | Workflows and saved prompts | Ctrl+Shift+E |
@@ -40,7 +41,13 @@ The default installer output is under `src-tauri/target/release/bundle/nsis`. Ca
 
 The **Projects** plus opens an existing folder or clones a repository. The plus at the right of the tab row opens a terminal. Drag a pane title or session row to a pane edge to arrange terminals from any project. Drag a divider or use arrow keys on the focused divider to resize. The Sessions panel can hide terminals, restore named layouts and surface terminal bells or configured periods of quiet.
 
+Switch projects to show their own tabs and running sessions. New terminals start in the project root. The **Worktrees** dialog provides an explicit terminal launch for a linked worktree. The Sessions panel opens with the current project's running sessions and offers a filter for other projects or previous sessions.
+
+Use a project's pin button to keep it at the top of the sidebar. Press Alt+1 through Alt+9 to switch to the first nine pinned projects in pin order.
+
 Ubuntu sessions can detach and reconnect while WSL remains running. Closing the window prompts before ending active PowerShell and Windows Antigravity sessions. New coding agent launches use full access by default for this workspace. Settings can turn this off for future launches. Prompt Studio uses the existing Claude subscription and lets you choose the model before each request.
+
+Use the X on a terminal pane, a single-terminal tab, or a session row to close that terminal. Live terminals require confirmation. Hide keeps a session running, and the Sessions panel can reopen or close hidden sessions. Use All sessions to find exited terminals.
 
 The Development panel fetches PR and Docker details on demand. Use the Spotify panel to control an existing Windows Spotify media session and optionally connect to the catalog and library.
 

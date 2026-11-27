@@ -5,7 +5,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
-import { button, confirmAction, el, input, reportError } from './ui.js';
+import { busy, button, confirmAction, el, input, reportError } from './ui.js';
 
 const binary = new TextEncoder();
 
@@ -14,9 +14,10 @@ export function specFor(session, launcher) {
 }
 
 export class TerminalView {
-  constructor(session, settings, onState) {
+  constructor(session, settings, onState, actions) {
     this.session = session;
     this.onState = onState;
+    this.actions = actions;
     this.root = el('div', { class: 'terminal-content' });
     this.surface = el('div', { class: 'terminal-renderer', 'aria-label': `Terminal ${session.title}` });
     this.feedback = el('div', { class: 'terminal-feedback', role: 'status', text: 'Connecting terminal…' });
@@ -122,7 +123,14 @@ export class TerminalView {
     if (this.connected) this.term.focus();
   }
 
-  mount(container, starting) {
+  showFeedback(message, action) {
+    this.feedback.replaceChildren(el('span', { text: message }),
+      action ? button(action === 'replace' ? 'Open new terminal here' : 'Retry terminal',
+        busy(this.actions[action])) : null);
+    this.feedback.hidden = false;
+  }
+
+  mount(container, starting, failure) {
     container.append(this.root);
     if (!this.opened) {
       this.term.open(this.surface);
@@ -133,8 +141,12 @@ export class TerminalView {
       return;
     }
     this.mounted = true;
-    this.feedback.hidden = false;
+    this.showFeedback(starting ? 'Starting terminal…' : 'Connecting terminal…');
     const epoch = ++this.epochCounter;
+    if (!starting && failure) {
+      this.showFeedback(failure, 'retry');
+      return;
+    }
     const previous = this.attachment.catch(() => {});
     this.attachment = previous.then(async () => {
       if (starting) await starting;
@@ -153,8 +165,10 @@ export class TerminalView {
       this.pump(epoch, attachment, this.cursor ?? cursor);
     }).catch(error => {
       if (this.mounted && epoch === this.epochCounter) {
-        this.feedback.hidden = false;
-        this.feedback.textContent = String(error);
+        const message = String(error);
+        const action = this.session.profile === 'powershell' && message.startsWith('This PowerShell terminal has ended.')
+          ? 'replace' : 'retry';
+        this.showFeedback(message, action);
         this.onState(this.session.id, 'unavailable', String(error));
       }
     });
@@ -185,7 +199,11 @@ export class TerminalView {
         }
       }
     } catch (error) {
-      if (this.mounted && epoch === this.epochCounter) this.onState(this.session.id, 'unavailable', String(error));
+      if (this.mounted && epoch === this.epochCounter) {
+        this.connected = false;
+        this.showFeedback(String(error), 'retry');
+        this.onState(this.session.id, 'unavailable', String(error));
+      }
     }
   }
 

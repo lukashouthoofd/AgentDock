@@ -20,6 +20,8 @@ const profile = join(process.env.LOCALAPPDATA, identifier, 'workspace.json');
 const evidence = resolve(output);
 await mkdir(evidence, { recursive: true });
 const sessionIds = new Set();
+const fixturePaths = new Set([ubuntu, windows, ubuntu + '-clone']);
+const projectName = path => path.split(/[\\/]/).at(-1);
 let launched;
 let browser;
 let port = 19281;
@@ -116,6 +118,23 @@ function toolbar(page, name) {
   return page.getByRole('banner', { name: 'Workspace toolbar' }).getByRole('button', { name, exact: true });
 }
 
+function projects(page) {
+  return page.getByRole('complementary', { name: 'Projects and terminals' });
+}
+
+async function switchProject(page, path) {
+  await projects(page).getByRole('button', { name: projectName(path), exact: true }).click();
+}
+
+async function terminateActive(page) {
+  const panel = page.locator('.pane.active');
+  const id = await panel.getAttribute('data-session');
+  await panel.getByRole('button', { name: /^Close terminal / }).click();
+  const confirmation = page.getByRole('dialog', { name: 'Close terminal', exact: true });
+  if (await confirmation.isVisible()) await confirmation.getByRole('button', { name: 'Close terminal' }).click();
+  await page.locator('.pane[data-session="' + id + '"]').waitFor({ state: 'hidden', timeout: 100000 });
+}
+
 async function command(page, value) {
   await tty(page).focus();
   await page.keyboard.insertText(value);
@@ -167,7 +186,7 @@ async function sample(label, count, startup, browserProfile) {
 async function captureWorkspace() {
   const workspace = await readFile(profile, 'utf8').then(JSON.parse).catch(() => null);
   for (const session of Object.values(workspace?.sessions || {})) {
-    if (session.profile === 'ubuntu' && [ubuntu, windows, ubuntu + '-clone'].some(path => session.path.startsWith(path))) {
+    if (session.profile === 'ubuntu' && fixturePaths.has(session.path)) {
       sessionIds.add(session.id);
     }
   }
@@ -196,8 +215,18 @@ try {
   const linuxId = await page.locator('.pane.active').getAttribute('data-session');
   const linuxTab = await page.locator('.tab[aria-current=page]').getAttribute('data-tab-id');
   result('Ubuntu real PTY, ANSI, Unicode, Linux kernel, exact WSL distribution and cwd');
+  await projects(page).getByRole('button', { name: 'Pin ' + projectName(ubuntu), exact: true }).click();
+  assert.equal(await projects(page).getByRole('button', { name: projectName(ubuntu), exact: true })
+    .getAttribute('aria-keyshortcuts'), 'Alt+1');
 
   await openProject(page, windows);
+  assert.equal(await page.locator('.pane').count(), 0);
+  assert.equal(await page.locator('.tab').count(), 0);
+  assert.equal(await projects(page).locator('[data-terminal-id]').count(), 0);
+  result('A new project starts with an empty workspace while the other project stays live');
+  await projects(page).getByRole('button', { name: 'Pin ' + projectName(windows), exact: true }).click();
+  assert.equal(await projects(page).getByRole('button', { name: projectName(windows), exact: true })
+    .getAttribute('aria-keyshortcuts'), 'Alt+2');
   await newShell(page, 'PowerShell');
   await command(page, "Write-Output ('AD'+'POWER'); (Get-Location).Path");
   await textInTerminal(page, 'ADPOWER');
@@ -213,10 +242,16 @@ try {
   await nativeTrees.getByText('windows-linked', { exact: true }).waitFor();
   await nativeTrees.getByRole('button', { name: 'Close' }).click();
   result('Discovered linked worktree created by Git for Windows');
-  await page.locator('.pane.active .pane-caption').dragTo(page.locator('[data-tab-id="' + linuxTab + '"]'));
+  await page.keyboard.press('Alt+Digit1');
+  await until(() => projects(page).getByRole('button', { name: projectName(ubuntu), exact: true })
+    .getAttribute('aria-pressed').then(value => value === 'true'), 'pinned project shortcut');
+  result('Project pinning assigns keyboard shortcuts that switch workspaces');
+  assert.equal(await page.locator('.tab').count(), 1);
+  await projects(page).getByRole('button', { name: 'Expand ' + windows.split(/\\/).at(-1) }).click();
+  const windowsRow = page.locator('[data-terminal-id="' + windowsId + '"]');
+  await windowsRow.dragTo(page.locator('[data-tab-id="' + linuxTab + '"]'));
   await until(() => page.locator('.pane').count().then(count => count === 2), 'cross-project split');
   result('Dragged PowerShell across tabs into a split with the Ubuntu terminal');
-  const windowsRow = page.locator('[data-terminal-id="' + windowsId + '"]');
   const windowsPane = page.locator('.pane[data-session="' + windowsId + '"] .pane-caption');
   await dockToEdge(page, windowsRow, linuxId, 'left', [windowsId, linuxId]);
   await dockToEdge(page, windowsPane, linuxId, 'above', [windowsId, linuxId]);
@@ -227,6 +262,8 @@ try {
   const terminalTabs = page.getByRole('navigation', { name: 'Terminal tabs' });
   const sessionsPanel = page.getByRole('complementary', { name: 'Sessions' });
   await terminalTabs.getByRole('button', { name: 'Sessions' }).click();
+  assert.equal(await sessionsPanel.locator('[data-session-action=open][data-session-id="' + windowsId + '"]').count(), 0);
+  await sessionsPanel.getByLabel('Filter sessions').selectOption('running');
   await sessionsPanel.getByRole('button', { name: 'Layouts' }).click();
   const layouts = page.getByRole('dialog', { name: 'Layout presets' });
   await layouts.getByLabel('Name for current layout').fill('Verification split');
@@ -243,12 +280,14 @@ try {
   if (await page.evaluate(() => matchMedia('(max-width: 1399px)').matches)) {
     await sessionsPanel.waitFor({ state: 'hidden' });
   } else {
-    await sessionsPanel.getByRole('button', { name: 'Close sessions' }).click();
+    await sessionsPanel.getByRole('button', { name: 'Hide Sessions panel' }).click();
   }
   result('Sessions rail hides renderers, keeps their processes alive and restores a named layout');
-  await page.locator('.pane.active').getByRole('button', { name: 'Terminal actions' }).click();
-  await page.getByRole('button', { name: 'Terminate terminal' }).click();
-  await page.getByRole('dialog', { name: 'Terminate terminal' }).getByRole('button', { name: 'Terminate' }).click();
+  await page.locator('.pane.active').getByRole('button', { name: /^Close terminal / }).click();
+  await page.getByRole('dialog', { name: 'Close terminal', exact: true }).getByRole('button', { name: 'Cancel' }).click();
+  assert.ok(alive(childPid), 'canceling Close preserved the process');
+  await terminateActive(page);
+  assert.equal(await page.locator('.pane.active').getAttribute('data-session'), linuxId);
   await until(() => page.locator('[data-terminal-id]').count().then(count => count === 1), 'bounded PowerShell termination');
   await until(() => !alive(childPid), 'PowerShell process job cleanup');
   result('Explicit PowerShell termination cleaned its controlled child process');
@@ -292,7 +331,25 @@ try {
   await toolbar(page, 'Worktrees').click();
   const trees = page.getByRole('dialog', { name: 'Git worktrees' });
   await trees.getByText('dock-worktree', { exact: true }).waitFor();
-  await trees.getByRole('button', { name: 'Close' }).click();
+  assert.equal(await projects(page).getByText('dock-worktree', { exact: true }).count(), 0);
+  const linked = trees.locator('.worktree-row').filter({ hasText: 'dock-worktree' });
+  const linkedPath = await linked.locator('.dialog-path').textContent();
+  fixturePaths.add(linkedPath);
+  await linked.getByRole('button', { name: 'New terminal' }).click();
+  await cmdAfterMount(page, 'printf "AD%s=%s\\n" LINKED "$PWD"');
+  await textInTerminal(page, 'ADLINKED=' + linkedPath);
+  const worktreeId = await page.locator('.pane.active').getAttribute('data-session');
+  await newShell(page);
+  await command(page, 'printf "AD%s=%s\\n" ROOT "$PWD"');
+  await textInTerminal(page, 'ADROOT=' + ubuntu);
+  const exitedId = await page.locator('.pane.active').getAttribute('data-session');
+  await command(page, 'exit');
+  await projects(page).locator('[data-terminal-id="' + exitedId + '"]').waitFor({ state: 'hidden', timeout: 15000 });
+  await terminateActive(page);
+  await page.locator('[data-terminal-id="' + worktreeId + '"]').click();
+  await terminateActive(page);
+  await page.locator('[data-terminal-id="' + linuxId + '"]').click();
+  result('Worktrees stay off the sidebar. Explicit worktree launch works, regular New Terminal opens the root, and exited sessions leave the sidebar');
   await toolbar(page, 'Development').click();
   const dev = page.getByRole('dialog', { name: 'Development' });
   await dev.getByText('Local branches', { exact: true }).waitFor();
@@ -326,6 +383,8 @@ try {
     return current.projects.some(item => item.path === ubuntu + '-clone');
   }, 'exact clone destination');
   result('Local Git CLI clone created and opened the requested Ubuntu path');
+  assert.equal(await page.locator('.tab').count(), 0);
+  await switchProject(page, ubuntu);
   await page.locator('[data-terminal-id="' + linuxId + '"]').click();
 
   const outputStarted = performance.now();
@@ -354,9 +413,7 @@ try {
     await newShell(page);
     const pane = page.locator('.pane.active');
     const id = await pane.getAttribute('data-session');
-    await pane.getByRole('button', { name: 'Terminal actions' }).click();
-    await page.getByRole('button', { name: 'Terminate terminal' }).click();
-    await page.getByRole('dialog', { name: 'Terminate terminal' }).getByRole('button', { name: 'Terminate' }).click();
+    await terminateActive(page);
     await until(() => page.locator('[data-terminal-id="' + id + '"]').count().then(count => count === 0), 'fixture terminal termination');
   }
   result('Three repeated Ubuntu create-and-terminate cycles under the 20-session load');
@@ -364,17 +421,25 @@ try {
   await openProject(page, windows);
   await newShell(page, 'PowerShell');
   const closingPowerShell = await page.locator('.pane.active').getAttribute('data-session');
+  await switchProject(page, ubuntu);
   await page.locator('[data-terminal-id="' + linuxId + '"]').click();
   await tty(page).waitFor({ state: 'attached', timeout: 20000 });
   await close(page);
   ({ page } = await start());
   const skip = page.getByRole('button', { name: 'Skip intro' });
   if (await skip.isVisible()) await skip.click();
+  assert.equal(await projects(page).getByRole('button', { name: projectName(ubuntu), exact: true })
+    .getAttribute('aria-keyshortcuts'), 'Alt+1');
+  assert.equal(await projects(page).getByRole('button', { name: projectName(windows), exact: true })
+    .getAttribute('aria-keyshortcuts'), 'Alt+2');
   await page.locator('[data-terminal-id="' + linuxId + '"]').click();
   await cmdAfterMount(page, 'printf "AD%s\\n" "$ADKEEP"');
   await textInTerminal(page, 'ADkeep');
   result('Native close/reopen restored the persisted Ubuntu shell');
-  await page.locator('[data-terminal-id="' + closingPowerShell + '"]').click();
+  await page.getByRole('navigation', { name: 'Terminal tabs' }).getByRole('button', { name: 'Sessions' }).click();
+  const restoredSessions = page.getByRole('complementary', { name: 'Sessions' });
+  await restoredSessions.getByLabel('Filter sessions').selectOption('all');
+  await restoredSessions.locator('[data-session-action=open][data-session-id="' + closingPowerShell + '"]').click();
   await page.getByText('This PowerShell terminal has ended.', { exact: false }).waitFor();
   result('Closing with an active PowerShell prompted and reopening did not start a new PowerShell');
   await close(page);

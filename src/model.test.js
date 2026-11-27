@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { arrangeTerminal, composePrompt, exchangeLeaves, formatBytes, initialModel, launchCommand, leaves,
-  removeTerminal, restoreLayout, splitLeaf } from './model.js';
+  pinnedProjects, projectTabs, removeTerminal, restoreLayout, splitLeaf } from './model.js';
 
 test('splits, exchanges and removes terminals without duplicating identities', () => {
   const model = initialModel();
@@ -67,4 +67,29 @@ test('agent launchers apply the requested permissions only to new agent launches
   assert.throws(() => launchCommand('claude', { ...settings, claude: 'claude && echo done' }), /\{permissions\}/);
   assert.equal(launchCommand('claude', { ...settings, claude: 'claude {permissions} && echo done' }),
     'claude --dangerously-skip-permissions && echo done');
+});
+
+test('project tabs stay scoped after docking and closing terminals', () => {
+  const model = initialModel();
+  model.project = 'first';
+  model.sessions = { a: { project: 'first' }, b: { project: 'second' }, c: { project: 'second' } };
+  model.tabs = [{ id: 'a-tab', tree: { id: 'a' } }, { id: 'b-tab', tree: { id: 'b' } },
+    { id: 'c-tab', tree: { id: 'c' } }];
+  model.active = 'a-tab';
+  assert.deepEqual(projectTabs(model, 'new-project'), []);
+  arrangeTerminal(model, 'b', 'a', 'left');
+  assert.deepEqual(projectTabs(model).map(tab => tab.id), ['a-tab']);
+  assert.deepEqual(leaves(projectTabs(model)[0].tree), ['b', 'a']);
+  assert.deepEqual(projectTabs(model, 'second').map(tab => tab.id), ['c-tab']);
+  removeTerminal(model, 'a');
+  assert.equal(model.active, 'a-tab');
+  assert.deepEqual(leaves(projectTabs(model)[0].tree), ['b']);
+  assert.deepEqual(projectTabs(model, 'second').map(tab => tab.id), ['c-tab']);
+});
+
+test('saved projects keep their pin order and stale pins are ignored', () => {
+  const projects = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+  const model = initialModel({ ...initialModel(), projects, pinnedProjects: ['c', 'gone', 'b', 'c'] });
+  assert.deepEqual(pinnedProjects(model).map(item => item.id), ['c', 'b']);
+  assert.deepEqual(pinnedProjects(initialModel({ ...model, pinnedProjects: null })), []);
 });

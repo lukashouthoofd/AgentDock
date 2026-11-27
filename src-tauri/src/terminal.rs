@@ -6,7 +6,7 @@ use std::{
     io::{Read, Write},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, Weak,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -16,6 +16,7 @@ const CHUNK: usize = 32 * 1024;
 const MAX_SESSIONS: usize = 64;
 const SOCKET: &str = "agentdock-v1";
 const WSL_DEADLINE: Duration = Duration::from_secs(12);
+const WSL_CLOSE_DEADLINE: Duration = Duration::from_secs(90);
 const TMUX_ALERT_OPTIONS: &[&str] = &[
     ";", "set-option", "-g", "monitor-bell", "on",
     ";", "set-option", "-g", "bell-action", "any",
@@ -52,6 +53,7 @@ pub struct Health {
     pub last_output: u64,
     pub bell: bool,
     pub bell_count: u64,
+    pub tmux_confirmed: bool,
 }
 
 #[derive(Serialize)]
@@ -197,6 +199,9 @@ impl Spec {
         match output.status.code() {
             Some(0) => Ok(()),
             Some(124) => Err("The Ubuntu working directory is missing or unavailable.".into()),
+            _ if host::text(&output.stderr).trim_end() == format!("duplicate session: {name}") => {
+                Ok(())
+            }
             _ => Err("Could not create the Ubuntu session. Check the distro and existing tmux installation.".into()),
         }
     }
@@ -484,15 +489,36 @@ impl Drop for Pty {
 #[derive(Default)]
 pub struct Terminals {
     ptys: Mutex<HashMap<String, Arc<Pty>>>,
-    lifecycle: Mutex<()>,
+    lifecycle: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     next_attachment: AtomicU64,
     configured_alerts: Mutex<HashSet<String>>,
 }
 
 impl Terminals {
+    fn lifecycle_lock(&self, id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.lifecycle.lock().unwrap();
+        if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        locks.retain(|_, lock| lock.strong_count() != 0);
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(id.to_owned(), Arc::downgrade(&lock));
+        lock
+    }
+
+    fn register(&self, id: String, pty: Arc<Pty>) -> Result<()> {
+        let mut ptys = self.ptys.lock().unwrap();
+        if ptys.len() >= MAX_SESSIONS {
+            return Err("The attachment limit was reached.".into());
+        }
+        ptys.insert(id, pty);
+        Ok(())
+    }
+
     pub fn create(&self, spec: Spec, cols: u16, rows: u16) -> Result<Start> {
         spec.verify()?;
-        let _guard = self.lifecycle.lock().unwrap();
+        let lifecycle = self.lifecycle_lock(&spec.id);
+        let _guard = lifecycle.lock().unwrap();
         let existing = self.ptys.lock().unwrap();
         if existing.contains_key(&spec.id) || existing.len() >= MAX_SESSIONS {
             return Err("This terminal already exists or the attachment limit was reached.".into());
@@ -503,7 +529,7 @@ impl Terminals {
         } else {
             let pty = Pty::spawn(&spec, cols, rows)?;
             pty.stream.set_visible(false);
-            self.ptys.lock().unwrap().insert(spec.id, pty);
+            self.register(spec.id, pty)?;
         }
         Ok(Start {
             cursor: 0,
@@ -513,7 +539,8 @@ impl Terminals {
 
     pub fn attach(&self, spec: Spec, cols: u16, rows: u16) -> Result<Start> {
         spec.verify()?;
-        let _guard = self.lifecycle.lock().unwrap();
+        let lifecycle = self.lifecycle_lock(&spec.id);
+        let _guard = lifecycle.lock().unwrap();
         self.attach_locked(&spec, cols, rows)
     }
 
@@ -548,7 +575,7 @@ impl Terminals {
         // invocation here would block independent pane attachments.
         let pty = Pty::spawn(spec, cols, rows)?;
         pty.attachment.store(attachment, Ordering::Release);
-        self.ptys.lock().unwrap().insert(spec.id.clone(), pty);
+        self.register(spec.id.clone(), pty)?;
         Ok(Start {
             cursor: 0,
             attachment,
@@ -557,7 +584,8 @@ impl Terminals {
 
     pub fn conceal(&self, spec: Spec) -> Result<()> {
         spec.verify()?;
-        let _guard = self.lifecycle.lock().unwrap();
+        let lifecycle = self.lifecycle_lock(&spec.id);
+        let _guard = lifecycle.lock().unwrap();
         if spec.profile == Profile::Ubuntu {
             let pty = self.ptys.lock().unwrap().remove(&spec.id);
             if let Some(pty) = pty {
@@ -572,11 +600,12 @@ impl Terminals {
 
     pub fn terminate(&self, spec: Spec) -> Result<()> {
         spec.verify()?;
-        let _guard = self.lifecycle.lock().unwrap();
+        let lifecycle = self.lifecycle_lock(&spec.id);
+        let _guard = lifecycle.lock().unwrap();
         if spec.profile == Profile::Ubuntu {
             let status = host::output_bounded(
                 tmux(&spec.distro).args(["kill-session", "-t", &target(&spec.id)?]),
-                WSL_DEADLINE,
+                WSL_CLOSE_DEADLINE,
             )?;
             let diagnostic = host::text(&status.stderr);
             let missing = diagnostic.starts_with("no server running")
@@ -682,6 +711,7 @@ impl Terminals {
                         last_output: pty.stream.last.load(Ordering::Relaxed),
                         bell: false,
                         bell_count: 0,
+                        tmux_confirmed: false,
                     },
                 )
             })
@@ -720,7 +750,9 @@ impl Terminals {
                         last_output: 0,
                         bell: false,
                         bell_count: 0,
+                        tmux_confirmed: true,
                     });
+                    entry.tmux_confirmed = true;
                     entry.bell |= *bell == "1";
                     entry.bell_count = entry.bell_count.max(count.parse().unwrap_or(0));
                     if let Ok(seconds) = activity.parse::<u64>() {

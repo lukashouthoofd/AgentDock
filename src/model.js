@@ -13,11 +13,16 @@ const defaults = {
 export function initialModel(stored) {
   const fresh = { version: 1, projects: [], recent: [], sessions: {}, tabs: [],
     active: null, project: null, worktree: null, sidebar: true, sessionsVisible: false,
-    layouts: [], settings: { ...defaults } };
+    layouts: [], pinnedProjects: [], settings: { ...defaults } };
   if (stored?.version !== 1 || !Array.isArray(stored.projects) || !Array.isArray(stored.tabs)
     || !stored.sessions || typeof stored.sessions !== 'object') return fresh;
   return { ...fresh, ...stored, layouts: Array.isArray(stored.layouts) ? stored.layouts : [],
+    pinnedProjects: Array.isArray(stored.pinnedProjects) ? [...new Set(stored.pinnedProjects)] : [],
     settings: { ...defaults, ...stored.settings } };
+}
+
+export function pinnedProjects(model) {
+  return model.pinnedProjects.map(id => model.projects.find(item => item.id === id)).filter(Boolean);
 }
 
 export function restoreLayout(model, layout) {
@@ -84,6 +89,14 @@ export function leaves(tree) {
   return tree?.id ? [tree.id] : tree ? [...leaves(tree.first), ...leaves(tree.second)] : [];
 }
 
+export function tabProject(model, tab) {
+  return tab?.project || leaves(tab?.tree).map(id => model.sessions[id]?.project).find(Boolean);
+}
+
+export function projectTabs(model, project = model.project) {
+  return model.tabs.filter(tab => tabProject(model, tab) === project);
+}
+
 export function updateLeaf(tree, id, transform) {
   if (tree?.id) return tree.id === id ? transform(tree) : tree;
   if (!tree) return null;
@@ -112,14 +125,18 @@ export function exchangeLeaves(tabs, first, second) {
 }
 
 export function removeTerminal(model, id) {
-  model.tabs = model.tabs.map(tab => ({ ...tab, tree: updateLeaf(tab.tree, id, () => null) }))
+  model.tabs = model.tabs.map(tab => ({
+    ...tab, project: tabProject(model, tab), tree: updateLeaf(tab.tree, id, () => null),
+  }))
     .filter(tab => tab.tree);
-  if (!model.tabs.some(tab => tab.id === model.active)) model.active = model.tabs.at(-1)?.id ?? null;
+  const tabs = model.project ? projectTabs(model) : model.tabs;
+  if (!tabs.some(tab => tab.id === model.active)) model.active = tabs.at(-1)?.id ?? null;
 }
 
 export function arrangeTerminal(model, source, target, position) {
   const destination = model.tabs.find(tab => leaves(tab.tree).includes(target));
   if (source === target || !model.sessions[source] || !destination) return null;
+  destination.project = tabProject(model, destination);
   const alreadyPlaced = model.tabs.some(tab => leaves(tab.tree).includes(source));
   if (position === 'center' && alreadyPlaced) {
     model.tabs = exchangeLeaves(model.tabs, source, target);
