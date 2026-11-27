@@ -67,3 +67,16 @@ To reproduce the shell workload, copy `scripts/benchmark-fixtures/shell.rc` and 
 The app’s private resident memory and proportional estimate were below the 150 MiB idle and 350 MiB ten-session targets. The summed working sets, which count shared mappings in each process, exceeded both targets. All seven proportional frames covered the complete app tree in each case. The workstation’s entire WSL VM measured 9845.87 MiB at idle and 9938.47 MiB with the fixtures. It was running other work, so those figures cannot be attributed to AgentDock.
 
 The 20-terminal desktop run separately verified three creation and termination cycles with one mounted renderer. It rendered the marker following 12,000 lines of output in 201 ms. VS Code and Windows Terminal were compared for startup, CPU and memory. Their output latency was not measured on the same instrumented flow.
+
+## AgentDock 0.2.0 Windows run
+
+The native desktop suite measured the updated Windows process tree, including WebView2, with seven samples per workload. It measured ten normal Ubuntu-24.04 Bash shells after exercising the development flows and kept one terminal renderer mounted. The earlier baseline rows used fresh application profiles and a minimal Bash rc file. The first AgentDock window in this run appeared at 983 ms.
+
+| Ubuntu shells | App private WS, MiB | App proportional estimate, MiB | App summed WS, MiB | Windows workload WS, MiB | Linux Bash RSS, MiB | Combined RSS, MiB | App CPU |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 93.84 | 133.56 | 391.38 | 391.38 | 0.00 | 391.38 | 0.1392% |
+| 10 | 154.06 | — | 499.78 | 533.07 | 64.75 | 597.82 | 0.3006% |
+
+The ten-shell check observed ten fixture Bash processes. One of the seven proportional frames could not query one process, so the table reports no ten-shell proportional estimate. App private residency stayed below the original targets. The summed Windows app working sets exceeded both of them. The WSL VM median working set was 7,503.05 MiB at idle and 7,655.00 MiB in the ten-shell run. The VM also hosted other work during both samples.
+
+The final desktop run verified twenty simultaneous Ubuntu terminals and three additional create-and-close cycles with one mounted renderer. The high-output fixture took 361 ms to display its marker following 12,000 lines. Earlier runs exposed Windows-to-WSL helper and attachment delays. Creation now serializes per distro and retries the same tmux ID on a timeout. The terminal transport keeps capability replies flowing while the view is connecting. If tmux confirms a live session without an attached client, the view retries the attachment once without restarting the shell.

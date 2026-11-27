@@ -24,3 +24,10 @@ The delivery gates are tracked in [the mission checkpoint](mission.md). Developm
 Use `AGENTDOCK_VERIFY_IDENTIFIER` to specify the disposable identifier compiled into the test executable. Set `AGENTDOCK_VERIFY_SUITE=tmux-keyboard` for the focused suite, which uses disposable tmux sockets and reuses the native app entry point.
 
 The test harness checks the Linux kernel and exact Ubuntu distro from inside the terminal. It records results in an external evidence directory and terminates only the fixture session IDs. It can use `AGENTDOCK_MEASURE_SCRIPT` to invoke the process-tree sampler during its idle and ten-Ubuntu-terminal phases.
+
+## AgentDock 0.2.0
+
+- The focused Windows suite passed 11 checks. It covered external discovery, the original Bash PID, native tmux history, exact pane selection and termination, stale identity rejection, configurable bindings, passthrough and keyboard pane placement. Default PowerShell survived a close and reopen with the same Windows PID. Explicit Close ended that fixture process.
+- The full Windows desktop suite passed 27 checks. It verified native Ubuntu kernel and distro, ANSI and Unicode output, Windows PowerShell, instant project switching, worktree navigation, responsive splits, masked dotenv edits, a reachable Docker engine, two merge celebrations, Git cloning, workflow templates, twenty Ubuntu shells, three churn cycles and app reopen. The clone form suggested the Ubuntu-native `~/projects` root before an explicit fixture destination override.
+- Separate native Claude Code and Codex processes resumed disposable conversations by exact ID. The Windows desktop also opened the installed Ubuntu Claude Code and Codex interfaces and generated the providers’ respective native `/loop` and `/goal` syntax. [tmux workspace verification](tmux-workspace.md)
+- Local JavaScript checks passed all 17 tests. The scoped independent native review and desktop fixtures were used when the local Aikido scanner could not start without its credential.
