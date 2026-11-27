@@ -276,13 +276,24 @@ impl Spec {
                 "/bin/sh",
                 "-c",
                 r#"cd -- "$1" 2>/dev/null || exit 124
-                    client=$2; socket=$3; shift 3
+                    client=$2; socket=$3; profile=$4; shift 4
+                    if [ "$profile" = windows ]; then
+                        # The invoking wsl.exe can close its interop socket before the pane starts.
+                        for durable in /run/WSL/1_interop /run/WSL/2_interop; do
+                            if [ -S "$durable" ]; then WSL_INTEROP=$durable; break; fi
+                        done
+                    fi
                     if [ -n "${WSL_INTEROP:-}" ]; then set -- -e "WSL_INTEROP=$WSL_INTEROP" "$@"; fi
                     exec "$client" -L "$socket" -f /dev/null new-session "$@""#,
                 "agentdock",
                 path,
                 "/usr/bin/tmux",
                 SOCKET,
+                if self.profile == Profile::Powershell {
+                    "windows"
+                } else {
+                    "linux"
+                },
             ])
             .args(args)
             .env_remove("TMUX")
